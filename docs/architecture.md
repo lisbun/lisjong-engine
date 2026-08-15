@@ -5,6 +5,10 @@
 `lisjong-engine` は、日本式リーチ麻雀を正しく進行するための独立したゲームエンジンである。
 AI戦略や外部実行環境との通信を担当せず、麻雀ルールと状態遷移の正しさを責務とする。
 
+lisjong ecosystem全体のrepository責務とrepository間依存方向は、
+[`lisjong-project` のArchitecture](https://github.com/lisbun/lisjong-project/blob/main/docs/architecture.md)を正本とする。
+本書は、その横断境界の内側にある `lisjong-engine` 固有のarchitectureを正本として扱う。
+
 ## 責務境界
 
 ### engineに含める
