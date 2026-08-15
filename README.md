@@ -10,6 +10,10 @@ AIの強さや戦略ではなく、ルール判定、状態管理、合法手、
 現在は初期開発段階です。まずPython package、test、CI、責務境界を整備し、その後
 `python-study` に残っている麻雀基盤を棚卸しして選択的に移行します。
 
+lisjong ecosystem全体のrepository責務、repository間依存方向、長期ロードマップは
+[`lisjong-project`](https://github.com/lisbun/lisjong-project) を正本とします。
+本repositoryでは `lisjong-engine` 内部のgame engine architectureと実装を管理します。
+
 ## lisjongとの関係
 
 ```text
