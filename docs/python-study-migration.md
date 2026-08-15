@@ -916,7 +916,10 @@ engineへ移さないと判断した主要資産。判断根拠を明示する�
    （調査時のfull test 1,899件成功は3.11.15での結果）。
    `lisjong-engine` は `requires-python = ">=3.14,<3.15"`。
    移送する各moduleが3.14で動作するかは未確認。
-   → Issue Aで最初に確認する。
+   → Issue A（#5）で移送済みのdomain model
+   （`tile` / `seat` / `wind` / `hand` / `discard` / `meld` / `wall` /
+   `round_phase`）についてPython 3.14で解消。3.14向けの互換修正は不要だった。
+   未移送のmodule（`winning` / `rules` / `round_state` 等）は各移送Issueで確認する。
 
 2. **`RoundState` の分割単位**
    2,980行を分割することは確定だが、具体的な境界（合法手生成 /
@@ -929,13 +932,17 @@ engineへ移さないと判断した主要資産。判断根拠を明示する�
    現状はどちらも可変（`add` / `remove` / `mark_called`）。
    決定性と状態復元の観点では不変値型が扱いやすいが、
    1局の進行では可変のほうが自然な場面もある。
-   → Issue Aで判断。
+   → Issue A（#5）で可変classのまま移行すると決定。不変値型への変更は
+   後続 `RoundState` の都合の先取りになるため行わない。
 
 4. **seed APIの粒度**
    半荘単位の単一seedから各局の山を導出するか、局ごとにseedを持つか。
    `docs/architecture.md` は「具体的なseed APIは実装Issueで確定する」と
    している。途中局からの再現可能性に影響する。
-   → Issue Aで確定。
+   → Issue A（#5）で `seed: int` → `RandomSource` → `create_shuffled_wall()`
+   の境界までを確定し、`Wall` へseed管理責務を持たせない形とした。
+   半荘seedと局seedの配分規則はどちらの方式も妨げないよう未固定で残し、
+   Match層（Issue F）で確定する。
 
 5. **終局基準がちょうど30,000点の場合の扱い**
    `docs/mahjong-rules.md` 20節が未確定事項として明示している。
