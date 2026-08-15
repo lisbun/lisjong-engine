@@ -2,7 +2,7 @@ from collections.abc import Iterable
 
 from lisjong_engine.tile import Tile
 
-MAX_TILE_COUNT = 14
+_MAX_TILE_COUNT = 14
 
 
 class Hand:
@@ -10,7 +10,7 @@ class Hand:
         tile_sequence = tuple(tiles)
         if any(not isinstance(tile, Tile) for tile in tile_sequence):
             raise TypeError("tiles must contain only Tile instances")
-        if len(tile_sequence) > MAX_TILE_COUNT:
+        if len(tile_sequence) > _MAX_TILE_COUNT:
             raise ValueError("hand cannot contain more than 14 tiles")
 
         tile_ids = tuple(tile.id for tile in tile_sequence)
@@ -30,7 +30,7 @@ class Hand:
     def add(self, tile: Tile) -> None:
         if not isinstance(tile, Tile):
             raise TypeError("tile must be a Tile")
-        if self.count >= MAX_TILE_COUNT:
+        if self.count >= _MAX_TILE_COUNT:
             raise ValueError("hand cannot contain more than 14 tiles")
         if any(existing_tile.id == tile.id for existing_tile in self._tiles):
             raise ValueError("hand must not contain duplicate physical tile IDs")

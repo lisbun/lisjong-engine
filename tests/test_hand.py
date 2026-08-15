@@ -1,6 +1,6 @@
 import unittest
 
-from lisjong_engine.hand import MAX_TILE_COUNT, Hand
+from lisjong_engine.hand import Hand
 from lisjong_engine.tile import STANDARD_TILES, Tile, TileCategory, TileType
 
 
@@ -22,8 +22,6 @@ class HandTest(unittest.TestCase):
         self.assertEqual(hand.tiles, STANDARD_TILES[:3])
 
     def test_accepts_maximum_fourteen_tiles(self) -> None:
-        self.assertEqual(MAX_TILE_COUNT, 14)
-
         hand = Hand(STANDARD_TILES[:14])
 
         self.assertEqual(hand.count, 14)
