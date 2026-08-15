@@ -62,8 +62,17 @@ rule mechanics + RuleSet
 engineのテスト・回帰確認・AI評価へ利用できるよう、同じversion、`RuleSet`、seed、入力系列から
 同じ状態遷移と結果を再現できる設計を重視する。
 
-乱数の利用箇所はengine内部で管理し、暗黙のglobal random stateへ依存しない方向とする。
-具体的なseed APIは実装Issueで確定する。
+乱数の利用箇所はengine内部で管理し、暗黙のglobal random stateへ依存しない。
+
+初期seed境界は次のとおり確定している（Issue #5）。
+
+```text
+seed: int -> RandomSource -> shuffled Wall
+```
+
+`RandomSource` はseedから決定的に生成されるengine-ownedな乱数sourceであり、
+`Wall`自身はseed管理責務を持たない。半荘seedと局seedの配分規則はまだ固定せず、
+Match層で確定する。
 
 ## python-studyからの移行
 
