@@ -35,6 +35,13 @@ test methodは1,809件。`python-study` repository全体のfull test
 （麻雀以外を含む1,899件）は、調査時にPython 3.11.15で成功を確認した。
 以下の `Status: completed` は、この実行結果を根拠とする。
 
+**`completed` の意味の範囲。** 本書の `completed` は、`python-study` で現在
+実装されている契約について既存testが成功していることを示すに過ぎない。
+麻雀ルール全体として未確認事項・未実装事項・外部サービス固有差分が存在
+しないことは意味しない。未実装・未確定の項目は
+`docs/mahjong-rules.md` 19〜20節に明記されており、本書でも
+Open questionとして引き継いでいる。
+
 test LOCがproduction LOCの約2.25倍である点は、本移行計画の中心的な前提で
 ある。**この repository で最も価値が高い資産はproduction codeではなく、
 麻雀ルールの契約を固定しているtestである。**
@@ -279,7 +286,7 @@ engineが必ず担わなければならないのは、次の一点である。
 | `game/decision_input.py` | observation + 差分イベントの束 | lisjong | completed | `game/test_event_input.py` 周辺 | **D** | `game.observation` | - | 同上 |
 | `game/event_input.py` | Decision外イベント配送のbatch型 | lisjong | completed | `game/test_event_input.py` (7) | **D** | `game.player_visible_event` | - | Player配送契約。engine責務外 |
 | `game/human_player.py` | CLI向けPlayer実装 | python-study | completed | `game/test_human_player.py` (10) | **D** | `game.player` | - | CLIの関心 |
-| `game/random_player.py` | ランダム選択Player | engine（再実装） | completed | `game/test_random_player.py` (12) | **B** | `game.player` | P7 | 既定値 `random.Random()` は非決定的。seed注入必須に変更 |
+| `game/random_player.py` | ランダム選択Player | lisjong / python-study | completed | `game/test_random_player.py` (12) | **C** | `game.player` | - | `action_options` から `random.choice()` で選ぶ意思決定主体はPolicyであり、engine責務外（Issue #1 / `docs/architecture.md`）。seed注入による再現性とtest選択手法だけを知見として引き継ぐ（後述） |
 
 #### `Player` と `GameController` についての判断
 
@@ -314,6 +321,29 @@ pull型core API:
 
 ABC class階層ではなくcallableを受け取ることで、engineは意思決定主体を
 モデル化せずに済み、`lisjong` は自由に `Player` 抽象を定義できる。
+
+`RandomPlayer`（`game/random_player.py`）はこの原則の具体例である。
+「`action_options` から `random.choice()` で1つ選ぶ」という処理自体は
+単純だが、**合法手集合から実際に1手を選ぶ意思決定を行っている時点で
+Policyである**。単純さは責務の所在を変えない。したがってengineへ
+再実装せず、`lisjong` / `python-study` 側の実装、または最小driverへ
+渡すtest用callableの参考実装として引き継ぐ（C）。
+
+engine自身のtestや半荘完走の回帰testでランダムな合法手選択が必要な場合は、
+`RandomPlayer` からは次の3点だけを知見として引き継ぎ、production package
+のPolicyとしては公開しない。
+
+- `random.Random` インスタンスを明示注入し、既定値の暗黙生成
+  （`random.Random()`）に頼らないことで選択を再現可能にする考え方
+- 合法手集合から1つ選んでengineの状態遷移を進めるtest手法
+- 決定的driverの回帰testに使える、seed固定の選択方法
+
+具体的には、`tests/` 配下のtest helperとして実装する（production APIには
+しない）。実装する場合は、production packageのPolicyとして公開しない、
+seedまたは`random.Random`を明示注入する、暗黙のglobal random stateへ
+依存しない、test helperであることが分かる配置・命名にする、の4点を
+満たす。ただしIssue #3ではproduction code実装を行わないため、実際の
+helper実装は行わない。
 
 `game/controller.py` の**test（67 test・2,054 LOC）は局面網羅の資産として
 価値が高い**。立直・暗槓・チー・大明槓・ロン・槍槓・加槓/嶺上ツモの各経路を
@@ -740,7 +770,7 @@ P2とP3は依存関係がなく並行できる。それ以外は直列である�
 | 項目 | 現状 | 必要な作業 |
 | --- | --- | --- |
 | **seed管理** | 公式APIなし。`create_shuffled_wall(random.Random())` をCLI境界で呼ぶだけ。fixtureが `random.Random(match_seed)` を手動構築 | engine内部でのseed管理と、seedから局・半荘を再現するAPIを新規設計（P1） |
-| **決定的driver** | `MatchController` + `RandomPlayer` はあるが、`RandomPlayer` の既定値が `random.Random()` で非決定的 | seed注入必須のdriverを新規実装（P7） |
+| **決定的driver** | `MatchController` はあるが、選択主体は `RandomPlayer`（Policy、非決定的な既定値 `random.Random()`）へ委ねられている | engineはPolicyを所有せず、外部から渡されたaction selector/callableで進行するdriverを新規実装（P7）。callable自体はengine外（`lisjong` / test helper）が提供する |
 | **pull型 core API** | push型 `GameController` のみ | `legal_actions` / `apply` 形式のAPIを新規設計（P5） |
 
 seed管理は `docs/architecture.md` が「乱数の利用箇所はengine内部で管理し、
@@ -824,15 +854,22 @@ seed管理は `docs/architecture.md` が「乱数の利用箇所はengine内部�
 
 ### Issue G: 席別観測境界と決定的最小driver
 
-- **scope**: 席別観測の射影と、seed固定で半荘を完走する最小driver
+- **scope**: 席別観測の射影と、seed固定で半荘を完走する最小driver。
+  **engineはPolicyを所有しない**。driverは座席ごとのaction selector/
+  callableを外部から受け取って進行するだけで、選択logicそのもの
+  （`RandomPlayer`相当のPolicy実装）はengineのproduction APIとして
+  持たない
 - **対象**: `public_state` / `observation` / `observation_builder` 相当を
   再設計。driverは新規実装
 - **prerequisite**: E, F
 - **完了条件**: 観測に隠蔽情報が含まれないことがtestで固定される。
   同一seed・同一 `RuleSet`・同一行動系列から半荘の全状態遷移と最終結果が
-  再現できる。**これが v0.1 の到達条件に相当する**
+  再現できる。**これが v0.1 の到達条件に相当する**。driver自身のtestで
+  決定的な選択が必要な場合は、`tests/` 配下のseed付きtest helperとして
+  実装し、production packageのPolicyとして公開しない
 - **次との依存**: なし（v0.1完成）
-- **注意**: `Player` ABCを公開契約にしない。座席ごとのcallableを受け取る
+- **注意**: `Player` ABCを公開契約にしない。座席ごとのcallableを受け取る。
+  `RandomPlayer` はengineへ再実装しない（C、Game-layer gray zones参照）
 
 ### 起票時に判断する事項
 
