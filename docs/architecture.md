@@ -89,6 +89,65 @@ WinningContext + DoraIndicators + winning interpretations + RuleSet
 
 詳細な契約は `docs/rules.md` の「9. 得点評価とRuleSet」を正本とする。
 
+## 局のcore API
+
+局の状態機械は、engineがPlayer / Policyを呼び出すpush型controllerではなく、
+呼び出し側が合法手を見て選び、engineへ適用するpull型境界とする（Issue #15）。
+
+```text
+snapshot = state.legal_actions(seat)
+chosen = snapshot.actions[0]
+state.apply(seat, chosen, expected_revision=snapshot.revision)
+```
+
+engine自身はactionを選択しない。`apply()` はcallerの「さきほど合法だった」という
+主張を信用せず、必ず現在の状態から合法手を再導出して照合する。
+
+### action identityとstaleness
+
+`LegalAction` はdomain値であり、process-globalなaction ID、UUID、adapter用の
+整数handleを持たない。actionの同一性は物理牌IDと宣言内容だけで判別する。
+
+一方、古いsnapshotから取り出したactionの検出には、局内の**state revision**を使う。
+revisionは局ローカルかつ単調増加で、同じ初期状態と同じaction sequenceからは常に
+同じprogressionになる。偶然同じdomain valueが現在も合法な場合でも、revisionが
+一致しなければfail closedで拒否する。
+
+```text
+LegalAction identity = domain data
+staleness            = RoundState revision
+```
+
+### mutation boundary
+
+`RoundState` はmutableだが、状態を進める操作はtransactionalとする。
+validationまたは遷移が失敗した場合、本体へpartial mutationを残さない。
+
+```text
+seat / phase / revision validation
+    -> 現在stateから合法手を再導出
+    -> action membership validation
+    -> working copyへ遷移
+    -> invariant validation
+    -> 成功時のみcommit
+```
+
+外部へ公開する状態はtuple等のimmutable viewに限り、`Hand` / `River` / `Wall` を
+直接渡さない。core APIを迂回した状態書き換えを構造的に防ぐためである。
+
+物理牌の不変条件は「どのobjectを通しても1回しか現れない」ではなく、
+**ownership上の重複・消失がない**ことと定義する。河の捨て牌と鳴きmeldが同じ
+物理牌を参照する局面でも破綻しない定義を維持するためである。
+
+### 合法手導出と反応境界
+
+合法手の導出は状態mutationから分離したpure moduleに置き、`RoundState` 側は
+薄いfacadeとする。
+
+反応（チー・ポン・槓・ロン）の解決を実装していない段階でも、反応が起こり得る
+局面を無視して次turnへ進めない。存在検知はfail-safeな過大評価とし、
+false positiveで停止することは許容し、false negativeで反応を飛ばさない。
+
 ## Determinism
 
 engineのテスト・回帰確認・AI評価へ利用できるよう、同じversion、`RuleSet`、seed、入力系列から

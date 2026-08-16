@@ -17,6 +17,12 @@ class SeatTest(unittest.TestCase):
             ("east", "south", "west", "north"),
         )
 
+    def test_next_returns_the_following_seat_and_wraps_around(self) -> None:
+        self.assertIs(Seat.EAST.next(), Seat.SOUTH)
+        self.assertIs(Seat.SOUTH.next(), Seat.WEST)
+        self.assertIs(Seat.WEST.next(), Seat.NORTH)
+        self.assertIs(Seat.NORTH.next(), Seat.EAST)
+
     def test_is_a_distinct_type_from_wind(self) -> None:
         for seat, wind in zip(Seat, Wind, strict=True):
             with self.subTest(seat=seat, wind=wind):
