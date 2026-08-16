@@ -57,12 +57,18 @@ deterministicな再現性の補助情報としてのみ使用する。
 
 ```text
 src/lisjong_engine/
-    yaku.py     # Yaku identifier（役の名前だけ）
-    rules.py    # RuleSet と policy enum
+    yaku.py             # Yaku identifier（役の名前だけ）
+    rules.py            # RuleSet と policy enum
+    yaku_evaluation.py  # 役の成立判定と翻・役満倍率
+    fu.py               # 符の内訳と最終符
+    dora.py             # 表示牌snapshotからのドラ計数
+    hand_value.py       # 役・符・ドラの統合評価
+    score.py            # 支払点
+    winning_score.py    # 得点候補の列挙と最高得点候補の選択
 ```
 
 `yaku.py` は役の **識別子** だけを定義し、翻数、日本語名、成立条件、
-役判定logicを持たない。役の評価は後続の得点評価層が担当する。
+役判定logicを持たない。役の評価は `yaku_evaluation.py` が担当する。
 
 ```text
 Yaku identifier -> RuleSet
@@ -72,6 +78,8 @@ RuleSet -X-> yaku evaluation
 
 `RuleSet` はパオ対象役やダブル役満の種類を役の識別子で指定するだけなので、
 この分離により、設定型が評価logicへ依存する構造を避けられる。
+
+得点評価層の詳細は「9. 得点評価とRuleSet」を参照。
 
 `lisjong_engine.__init__` からの一括re-exportは行わない。利用側は責務moduleから
 直接importする。
@@ -363,20 +371,113 @@ double_yakuman_variants  -> frozenset
 
 正規化後の `RuleSet` はhashableである。
 
-## 9. 未実装・未確定事項
+## 9. 得点評価とRuleSet
+
+得点評価層は、和了時点で確定した事実と `RuleSet` から評価結果を作る、
+局状態機械に依存しないpureな層である。
+
+```text
+WinningContext + DoraIndicators + winning interpretations + RuleSet
+    -> WinningScoreSelection
+```
+
+最上位の境界は `winning_score.evaluate_winning_scores()` であり、
+rule設定は単一の `RuleSet` だけを受け取る。`rules` を省略した場合は
+`RuleSet.default()` を使う。
+
+### 各moduleが参照するRuleSet field
+
+| module | 参照するfield |
+| --- | --- |
+| `yaku_evaluation` | `double_yakuman_variants` |
+| `fu` | `double_wind_pair_fu` |
+| `score` | `rounded_mangan_enabled` / `counted_yakuman_enabled` / `multiple_yakuman_enabled` |
+| `dora` | なし |
+| `hand_value` / `winning_score` | 下位moduleへ受け渡すのみ |
+
+各moduleは必要なfieldだけを参照し、preset名では分岐しない。
+
+### 入力境界
+
+`WinningContext` は和了そのものの事実（手牌・副露・和了牌・ツモ/ロン・風・
+立直・一発など）を持つ。ドラ表示牌は和了そのものの事実ではないため、
+`WinningContext` へは持たせず `DoraIndicators` として別入力にする。
+
+`DoraIndicators` は和了時点で **既に確定している** 表示牌のsnapshotである。
+どの槓ドラ表示牌が有効かを決めるのは局進行の責務であり、`dora.py` は
+`kan_dora_reveal_policy` を解釈しない。裏ドラ・槓裏ドラを数えるかどうかは
+`WinningContext.riichi_status` から判断する。
+
+### 符の内訳
+
+`FuCalculation` は最終符だけでなく `FuComponent` の内訳を保持する。
+主要な契約は次のとおり。
+
+- 七対子は固定25符とし、切り上げない
+- 平和ツモは20符（ツモ符を加えない）
+- それ以外の通常形は10符単位で切り上げ、最低30符
+- ロンで完成した刻子は暗刻として数えない
+- 暗槓はclosed quadとして評価する
+- 連風牌雀頭の符は `double_wind_pair_fu` に従う
+
+面子のopen/concealed、ロン完成刻子、么九牌、雀頭の価値、待ち形は
+`interpretation_analysis` の結果を役側・符側で共有し、どちらでも再推測しない。
+
+### ドラの内訳
+
+`DoraCount` は `visible` / `ura` / `red` / `kan` / `kan_ura` を個別に保持し、
+`total` でbonus翻へ換算する。翻数へ潰す前の根拠を残すため、上位APIでは
+opaqueなbonus翻を受け取らず `DoraCount` で表現する。
+
+**ドラは役ではない。** 構造上は和了形でも役が1つも成立しなければ、ドラだけでは
+得点付き和了にならない。
+
+```text
+winning shape exists != legal scored win
+```
+
+### limitとrounding
+
+基本点は満貫2,000、跳満3,000、倍満4,000、三倍満6,000、役満8,000とする。
+支払点は100点単位へ切り上げ、ツモは支払者ごとに個別へ切り上げる。
+
+- `rounded_mangan_enabled`: 4翻30符・3翻60符を満貫として扱うか
+- `counted_yakuman_enabled`: 13翻以上を数え役満（常に1倍役満）として扱うか
+- `multiple_yakuman_enabled`: 明示的な複合役満の倍率を加算するか
+
+明示的な役満は通常翻と混在させず、符を持たず、ドラを倍率へ加算しない。
+数え役満は倍率に関わらず常に1倍役満とし、実際の符を保持する。
+
+### 得点候補の選択
+
+`winning.py` が列挙するすべての和了形・和了解釈を個別に評価し、途中で代表候補へ
+絞らない。候補の比較は翻数ではなく最終的な `winner_points` で行う。
+
+最大点が同じ候補は1つへ潰さず、`max_score_candidates` にすべて保持する。
+候補集合は `frozenset` であり、順序に意味を持たせない。
+
+### RoundStateとの責務境界
+
+得点評価層が扱うのは、1人の和了に対する基本支払点までである。
+本場、供託、複数ロンの支払配分、パオの最終精算、流し満貫の局精算は
+後続のRound / Match層が扱う。
+
+## 10. 未実装・未確定事項
 
 ### 後続Issueへ送った内容
 
 `RuleSet` は設定値だけを表すため、次はいずれも本ルール契約の外にあり、
 後続Issueで実装する。
 
-- 役判定logic、符計算、ドラ計算、翻・符の統合、点数計算
 - 合法手生成、反応解決、立直判定、局の状態遷移
-- 精算、最終順位計算、半荘の状態管理
+- 本場・供託を含む局精算、複数ロンの支払配分、パオの最終精算
+- 最終順位計算、半荘の状態管理
 - 席別観測、対局driver
 
-したがって、`RuleSet` の各fieldは現時点では「設定値として表現できる」ことまでが
-固定されており、実際にmechanicsへ接続されるのは後続Issue以降である。
+役判定logic、符計算、ドラ計算、翻・符の統合、点数計算は得点評価層として
+実装済みであり、「9. 得点評価とRuleSet」で扱う。それ以外のfieldは現時点では
+「設定値として表現できる」ことまでが固定されており、実際にmechanicsへ
+接続されるのは後続Issue以降である。
 
 ### ルール自体の未実装・未確定事項
 
@@ -385,7 +486,7 @@ double_yakuman_variants  -> frozenset
   推測で実装しない
 - 赤牌枚数、喰い断などは、現時点では `RuleSet` のconfig対象にしていない
 
-## 10. 外部サービスのルール
+## 11. 外部サービスのルール
 
 天鳳、雀魂、M.LEAGUE、RiichiLab等の外部サービス固有ルールは、
 本engineのpresetとして固定していない。`RuleSet.default()` が唯一の公式presetである。
@@ -404,7 +505,7 @@ double_yakuman_variants  -> frozenset
 `dataclasses.replace()` で構成できることをtestで固定している。
 外部サービスpresetを追加する場合は、出典を確認したうえで後続Issueで扱う。
 
-## 11. 移行履歴
+## 12. 移行履歴
 
 `python-study` では、ルール設定が次の4型へ分かれていた。
 

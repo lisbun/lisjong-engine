@@ -61,6 +61,34 @@ rule mechanics + RuleSet
 外部サービス固有presetへ反映する項目は、公式仕様、公開実装、実測等で確認できたものに限定する。
 未確認のルールを推測で埋めない。
 
+## 得点評価層
+
+役、符、ドラ、点数の評価は、局状態機械から独立したpureな評価層として実装する（Issue #13）。
+
+```text
+immutable scoring facts + RuleSet -> immutable evaluation result
+```
+
+入力は和了時点で確定した事実だけであり、`RoundState` を参照しない。
+
+```text
+WinningContext + DoraIndicators + winning interpretations + RuleSet
+    -> WinningScoreSelection
+```
+
+`Yaku` identifier（`yaku.py`）と役の成立判定（`yaku_evaluation.py`）は別moduleとし、
+`RuleSet` から評価logicへの逆依存を作らない。役・符は `interpretation_analysis` の
+正規化結果を共有し、面子のopen/concealedやロン完成刻子を各層で再推測しない。
+
+評価結果は最終点数へ潰さず、成立役、役ごとの翻・役満倍率、符の内訳、ドラの内訳を
+保持して、評価根拠を人間が監査できる形を維持する。複数の和了解釈はすべて個別に
+評価し、最高得点候補が同点の場合も1つへ潰さない。
+
+得点評価層が担当するのは、1人の和了に対する基本支払点までである。本場、供託、
+複数ロンの支払配分、パオの最終精算、流し満貫の局精算はRound / Match層の責務とする。
+
+詳細な契約は `docs/rules.md` の「9. 得点評価とRuleSet」を正本とする。
+
 ## Determinism
 
 engineのテスト・回帰確認・AI評価へ利用できるよう、同じversion、`RuleSet`、seed、入力系列から
