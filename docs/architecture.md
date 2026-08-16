@@ -201,12 +201,21 @@ RoundState(
 
 ### 槓と一発のconfirmation境界
 
-Kakan / Ankanは、槍槓解決前に副露を破壊的に確定しない。宣言factをpendingとして保持し、
-Ronなら槓を成立させず、all-passで初めてconfirmationする。
+Kakanは必ず槍槓reaction windowを開き、宣言factをpendingとして保持する。元のPonは
+`AWAITING_KAKAN_REACTIONS`中には破壊的に置換せず、RonならKakanを成立させない。
+all-passで初めてKakanをconfirmationし、PonをKakanへ置換する。
+
+Ankanがpending reactionを経由するのは、`kokushi_ankan_chankan_enabled`が有効で、かつ
+合法な国士無双による暗槓槍槓候補が存在する場合だけである。この場合は宣言factをpendingとして
+保持して`AWAITING_ANKAN_REACTIONS`へ入り、Ronなら不成立、all-passならconfirmationする。
+合法な候補が存在しない場合は、宣言と同じtransactionでAnkanをconfirmationし、
+`AWAITING_RINSHAN_DRAW`へ移る。
 
 一発を終了するのも槓の宣言ではなく成立時点である。したがって槍槓Ronで成立しなかった
 Kakan / Ankanでは一発factを維持し、E3が `RIICHI + IPPATSU + CHANKAN` を含む
-`WinningContext` を構築できる。成立したChi / Pon / Daiminkan / Kakan / Ankanは一発を終了する。
+`WinningContext` を構築できる。reaction候補のないAnkanは宣言と同じtransactionで成立するため、
+そのtransactionの完了時には一発も終了する。成立したChi / Pon / Daiminkan / Kakan / Ankanは
+一発を終了する。
 
 槓ドラの公開タイミングは`RuleSet.kan_dora_reveal_policy`へ従う。暗槓と加槓は成立時に公開し、
 `DELAY_OPEN_KAN_DORA`における大明槓だけは直後の打牌がRon以外で解決するまで保留する。

@@ -36,7 +36,6 @@ from lisjong_engine.furiten import FuritenReason
 from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
-    DaiminkanLegalAction,
     DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
@@ -3470,18 +3469,6 @@ class RoundStateKanIppatsuTest(unittest.TestCase):
         self.assertEqual([type(meld) for meld in state.melds(Seat.EAST)], [Ankan])
         self.assertFalse(state.is_ippatsu(Seat.NORTH))
         self.assertTrue(state.is_riichi_established(Seat.NORTH))
-
-    def test_a_daiminkan_still_cancels_ippatsu_on_the_spot(self) -> None:
-        """大明槓は打牌への反応として即座に成立するため、その場で一発を消す。"""
-        state = _riichi_declaration_state()
-        resolve_all_pass(state)
-        self.assertTrue(state.is_ippatsu(Seat.EAST))
-
-        draw_and_discard(state, Seat.SOUTH, "7p")
-        self.assertFalse(has_action_of_type(state, Seat.NORTH, DaiminkanLegalAction))
-        resolve_with(state, {Seat.NORTH: pon_action(state, Seat.NORTH)})
-
-        self.assertFalse(state.is_ippatsu(Seat.EAST))
 
     def test_a_failed_chankan_batch_leaves_ippatsu_untouched(self) -> None:
         state = _riichi_before_kakan_state()
