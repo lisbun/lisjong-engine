@@ -1,15 +1,5 @@
 import unittest
 
-from _round_fixtures import (
-    daiminkan_action,
-    dealt_state,
-    draw_and_discard,
-    has_action_of_type,
-    resolve_all_pass,
-    resolve_with,
-    tile_type,
-)
-
 from lisjong_engine.legal_action import (
     DaiminkanLegalAction,
     DiscardDeclaration,
@@ -20,6 +10,15 @@ from lisjong_engine.reaction import ReactionType
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.seat import Seat
 
+from _round_fixtures import (
+    daiminkan_action,
+    dealt_state,
+    draw_and_discard,
+    has_action_of_type,
+    resolve_all_pass,
+    resolve_with,
+    tile_type,
+)
 
 _HANDS = {
     Seat.EAST: (
