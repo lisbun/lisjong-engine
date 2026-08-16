@@ -94,6 +94,8 @@ WinningContext + DoraIndicators + winning interpretations + RuleSet
 局の状態機械は、engineがPlayer / Policyを呼び出すpush型controllerではなく、
 呼び出し側が合法手を見て選び、engineへ適用するpull型境界とする（Issue #15）。
 
+通常手番では次の形をとる。
+
 ```text
 snapshot = state.legal_actions(seat)
 chosen = snapshot.actions[0]
@@ -102,6 +104,24 @@ state.apply(seat, chosen, expected_revision=snapshot.revision)
 
 engine自身はactionを選択しない。`apply()` はcallerの「さきほど合法だった」という
 主張を信用せず、必ず現在の状態から合法手を再導出して照合する。
+
+捨て牌・加槓・暗槓に対する反応は、複数seatのchoiceをcaller側で集めてから
+1 transactionとして解決する（Issue #17）。
+
+```text
+choices = {
+    seat: choose(state.legal_actions(seat))
+    for seat in state.reacting_seats
+}
+resolution = state.resolve_reactions(
+    choices,
+    expected_revision=state.revision,
+)
+```
+
+`reacting_seats` はsource / declarer以外の3席すべてを返し、実質的に反応できない席にも
+`PassLegalAction` を提示する。seatごとの逐次commitは行わず、Ron / Pon / Chi /
+Daiminkan等のpriorityはengine側のpureなresolverでdeterministicに確定する。
 
 ### action identityとstaleness
 
@@ -118,10 +138,14 @@ LegalAction identity = domain data
 staleness            = RoundState revision
 ```
 
+通常action、reaction batchのいずれも、成功した1 transactionにつきrevisionは1だけ増える。
+
 ### mutation boundary
 
 `RoundState` はmutableだが、状態を進める操作はtransactionalとする。
 validationまたは遷移が失敗した場合、本体へpartial mutationを残さない。
+
+通常actionは概ね次の順序で処理する。
 
 ```text
 seat / phase / revision validation
@@ -132,6 +156,11 @@ seat / phase / revision validation
     -> 成功時のみcommit
 ```
 
+reaction batchも同じ原則に従い、全seatのchoiceを検証してpriorityを解決した後、
+working copy上で一発・フリテン・立直・副露・槓ドラ等をまとめて更新し、
+invariantを満たした場合だけ1回commitする。missing / extra / illegal choiceやstale revisionで
+失敗した場合、player state、phase、pending fact、event、revisionのいずれも変更しない。
+
 外部へ公開する状態はtuple等のimmutable viewに限り、`Hand` / `River` / `Wall` を
 直接渡さない。core APIを迂回した状態書き換えを構造的に防ぐためである。
 
@@ -139,14 +168,73 @@ seat / phase / revision validation
 **ownership上の重複・消失がない**ことと定義する。河の捨て牌と鳴きmeldが同じ
 物理牌を参照する局面でも破綻しない定義を維持するためである。
 
+### Matchとの点数境界
+
+`RoundState` は局開始時の持ち点を、必須のimmutable snapshotとして受け取る。
+
+```text
+RoundState(
+    wall,
+    round_start_points={Seat.EAST: ..., Seat.SOUTH: ..., Seat.WEST: ..., Seat.NORTH: ...},
+)
+```
+
+`round_start_points` は立直可能条件等、その局の合法手判定に必要な入力factであり、
+`RoundState` がMatch全体のauthoritativeな現在点を所有することを意味しない。
+
+立直成立時もRoundState自身は持ち点を減算せず、`RiichiContribution` と
+`riichi_payment_deltas` を記録する。実際の点数移動と供託本数の管理はMatch層が担当する。
+これによりRoundの合法手・状態遷移と、Matchの継続的な点数authorityを分離する。
+
 ### 合法手導出と反応境界
 
 合法手の導出は状態mutationから分離したpure moduleに置き、`RoundState` 側は
 薄いfacadeとする。
 
-反応（チー・ポン・槓・ロン）の解決を実装していない段階でも、反応が起こり得る
-局面を無視して次turnへ進めない。存在検知はfail-safeな過大評価とし、
-false positiveで停止することは許容し、false negativeで反応を飛ばさない。
+反応windowでは現在stateから各seatの合法手を再導出し、callerが渡したchoiceを再検証する。
+反応のpriority解決自体もpureなresolverへ分離し、mappingのiteration順に結果を依存させない。
+
+鳴き後の打牌はdrawを伴わないため、pending discardのprovenanceである
+`pending_discard_source` はoptionalである。`LIVE_WALL` / `RINSHAN` はdraw由来の打牌を表し、
+`None` はChi / Pon後等のツモなし打牌を表す。provenanceが無いことを理由にreaction windowを
+失わない。
+
+### 槓と一発のconfirmation境界
+
+Kakanは必ず槍槓reaction windowを開き、宣言factをpendingとして保持する。元のPonは
+`AWAITING_KAKAN_REACTIONS`中には破壊的に置換せず、RonならKakanを成立させない。
+all-passで初めてKakanをconfirmationし、PonをKakanへ置換する。
+
+Ankanがpending reactionを経由するのは、`kokushi_ankan_chankan_enabled`が有効で、かつ
+合法な国士無双による暗槓槍槓候補が存在する場合だけである。この場合は宣言factをpendingとして
+保持して`AWAITING_ANKAN_REACTIONS`へ入り、Ronなら不成立、all-passならconfirmationする。
+合法な候補が存在しない場合は、宣言と同じtransactionでAnkanをconfirmationし、
+`AWAITING_RINSHAN_DRAW`へ移る。
+
+一発を終了するのも槓の宣言ではなく成立時点である。したがって槍槓Ronで成立しなかった
+Kakan / Ankanでは一発factを維持し、E3が `RIICHI + IPPATSU + CHANKAN` を含む
+`WinningContext` を構築できる。reaction候補のないAnkanは宣言と同じtransactionで成立するため、
+そのtransactionの完了時には一発も終了する。成立したChi / Pon / Daiminkan / Kakan / Ankanは
+一発を終了する。
+
+槓ドラの公開タイミングは`RuleSet.kan_dora_reveal_policy`へ従う。暗槓と加槓は成立時に公開し、
+`DELAY_OPEN_KAN_DORA`における大明槓だけは直後の打牌がRon以外で解決するまで保留する。
+
+### E2と和了確定の境界
+
+Issue #17（E2）は、Ronの合法性・reaction priority・成立者とprovenanceを確定するところまでを
+担当する。Ron成立後は `RoundPhase.AWAITING_WIN_FINALIZATION` へ移り、immutableな
+`PendingRonResolution` にsource、target tile、成立者、chankan / last-tile判定に必要なfactを保持する。
+
+```text
+reaction resolution
+    -> AWAITING_WIN_FINALIZATION
+    -> PendingRonResolution
+    -> E3: scoring / settlement / RoundResult
+```
+
+E2では点数確定や`RoundResult`構築を先取りしない。同じreaction windowの二重解決はphaseと
+pending factのinvariantで拒否する。
 
 ## Determinism
 

@@ -15,6 +15,7 @@ class RoundPhaseTest(unittest.TestCase):
                 ("AWAITING_REACTIONS", "awaiting_reactions"),
                 ("AWAITING_KAKAN_REACTIONS", "awaiting_kakan_reactions"),
                 ("AWAITING_ANKAN_REACTIONS", "awaiting_ankan_reactions"),
+                ("AWAITING_WIN_FINALIZATION", "awaiting_win_finalization"),
                 ("FINISHED", "finished"),
             ),
         )

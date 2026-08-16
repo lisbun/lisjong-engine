@@ -48,7 +48,7 @@ class RoundEventValueTest(unittest.TestCase):
     def test_draw_source_is_limited_to_the_implemented_sources(self) -> None:
         self.assertEqual(
             tuple((source.name, source.value) for source in DrawSource),
-            (("LIVE_WALL", "live_wall"),),
+            (("LIVE_WALL", "live_wall"), ("RINSHAN", "rinshan")),
         )
 
     def test_rejects_invalid_event_fields(self) -> None:
