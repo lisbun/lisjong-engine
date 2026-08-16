@@ -1160,18 +1160,74 @@ class RoundStateInvariantGuardTest(unittest.TestCase):
         self.assertIs(state.phase, RoundPhase.AWAITING_ANKAN_REACTIONS)
         self.assertIs(state.current_seat, Seat.EAST)
 
-    def test_rejects_a_drawn_tile_reference_outside_the_discard_phase(self) -> None:
+    def test_allows_awaiting_kakan_reactions_with_a_drawn_tile(self) -> None:
+        """加槓宣言後、槍槓reaction待ちの間もそのturnのdrawn tileを保持できる。
+
+        旧`python-study`の状態機械では、加槓宣言は`AWAITING_DISCARD`の
+        drawn tileを保持したまま`AWAITING_KAKAN_REACTIONS`へ進み、加槓成立
+        確定時に初めてdrawn tileをclearする。E1はpending kakan model自体を
+        持たないが、invariantがこの正常状態を禁止してはならない。
+        """
         state = _quiet_state()
         drawn_tile = state.draw(Seat.EAST)
-        original = _capture(state)
         transition = state._begin()
-        transition.phase = RoundPhase.AWAITING_RINSHAN_DRAW
+        transition.phase = RoundPhase.AWAITING_KAKAN_REACTIONS
 
-        with self.assertRaises(RoundInvariantError):
-            state._commit(transition)
+        state._commit(transition)
 
-        self.assertEqual(_capture(state), original)
+        self.assertIs(state.phase, RoundPhase.AWAITING_KAKAN_REACTIONS)
+        self.assertIs(state.current_seat, Seat.EAST)
         self.assertEqual(state.drawn_tile_id, drawn_tile.id)
+
+    def test_allows_awaiting_ankan_reactions_with_a_drawn_tile(self) -> None:
+        """暗槓宣言後、槍槓reaction待ちの間もそのturnのdrawn tileを保持できる。
+
+        旧`python-study`の状態機械では、暗槓宣言は`AWAITING_DISCARD`の
+        drawn tileを保持したまま`AWAITING_ANKAN_REACTIONS`へ進み、暗槓成立
+        確定時に初めてdrawn tileをclearする。E1はpending ankan model自体を
+        持たないが、invariantがこの正常状態を禁止してはならない。
+        """
+        state = _quiet_state()
+        drawn_tile = state.draw(Seat.EAST)
+        transition = state._begin()
+        transition.phase = RoundPhase.AWAITING_ANKAN_REACTIONS
+
+        state._commit(transition)
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_ANKAN_REACTIONS)
+        self.assertIs(state.current_seat, Seat.EAST)
+        self.assertEqual(state.drawn_tile_id, drawn_tile.id)
+
+    def test_rejects_a_drawn_tile_reference_outside_allowed_phases(self) -> None:
+        """drawn tileを保持できるphaseは discard / kakan・ankan反応待ちに限る。
+
+        `AWAITING_RINSHAN_DRAW`はcurrent seatを要求するphaseだが、嶺上牌を
+        引く前にdrawn tileが残っているのは不正状態であり、引き続き拒否する。
+        `UNDEALT` / `AWAITING_DRAW` / `AWAITING_REACTIONS` / `FINISHED`は
+        current seatの要不要が異なるphaseだが、いずれもdrawn tileを保持した
+        ままの遷移をfail closedで拒否する。
+        """
+        disallowed_phases = (
+            RoundPhase.UNDEALT,
+            RoundPhase.AWAITING_DRAW,
+            RoundPhase.AWAITING_RINSHAN_DRAW,
+            RoundPhase.AWAITING_REACTIONS,
+            RoundPhase.FINISHED,
+        )
+
+        for phase in disallowed_phases:
+            with self.subTest(phase=phase):
+                state = _quiet_state()
+                drawn_tile = state.draw(Seat.EAST)
+                original = _capture(state)
+                transition = state._begin()
+                transition.phase = phase
+
+                with self.assertRaises(RoundInvariantError):
+                    state._commit(transition)
+
+                self.assertEqual(_capture(state), original)
+                self.assertEqual(state.drawn_tile_id, drawn_tile.id)
 
     def test_rejects_a_drawn_tile_not_owned_by_the_current_hand(self) -> None:
         state = _quiet_state()

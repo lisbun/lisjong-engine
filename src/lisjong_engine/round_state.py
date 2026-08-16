@@ -59,6 +59,18 @@ _SEAT_ORDER = tuple(Seat)
 _DEAL_BLOCK_SIZE = 4
 _DEAL_BLOCK_COUNT = 3
 
+# drawn tileを保持できるphase。E1で実際に到達するのは`AWAITING_DISCARD`
+# だけだが、E2の加槓・暗槓は打牌後の`AWAITING_DISCARD`から宣言し、槍槓
+# reactionを待つ間もそのturnのdrawn tileを保持し続ける。加槓・暗槓成立が
+# 確定した時点で初めてdrawn tileをclearし`AWAITING_RINSHAN_DRAW`へ進む
+# ため、ここでdrawn tile保持可能phaseを`AWAITING_DISCARD`のみへ限定して
+# はならない。
+_DRAWN_TILE_HOLDING_PHASES = (
+    RoundPhase.AWAITING_DISCARD,
+    RoundPhase.AWAITING_KAKAN_REACTIONS,
+    RoundPhase.AWAITING_ANKAN_REACTIONS,
+)
+
 
 class RoundStateError(Exception):
     """局の状態機械が呼び出しを拒否したことを表す基底例外。"""
@@ -454,13 +466,16 @@ class RoundState:
             raise RoundInvariantError(f"{phase.value} must not have a current seat")
 
         if transition.drawn_tile_id is not None:
-            # drawn tileがあれば必ずAWAITING_DISCARDである、という片方向の
-            # 含意だけを検証する。逆方向（AWAITING_DISCARDなら必ずdrawn
-            # tileがある）は要求しない。鳴き成立後の打牌はツモを伴わない
-            # 正常なAWAITING_DISCARDだからである。
-            if phase is not RoundPhase.AWAITING_DISCARD:
+            # drawn tileがあれば必ず`_DRAWN_TILE_HOLDING_PHASES`のいずれかで
+            # ある、という片方向の含意だけを検証する。逆方向（それらの
+            # phaseなら必ずdrawn tileがある）は要求しない。鳴き成立後の
+            # 打牌はツモを伴わない正常なAWAITING_DISCARDであり、E1はpending
+            # kakan/ankan state自体を持たないため、将来の挙動を必要以上に
+            # 固定しない。
+            if phase not in _DRAWN_TILE_HOLDING_PHASES:
                 raise RoundInvariantError(
-                    "a drawn tile reference can only be held while awaiting a discard"
+                    "a drawn tile reference can only be held while awaiting a "
+                    "discard or a kakan/ankan reaction"
                 )
             if all(
                 tile.id != transition.drawn_tile_id
