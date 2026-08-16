@@ -115,9 +115,7 @@ class RoundStateDaiminkanIppatsuRegressionTest(unittest.TestCase):
         self.assertTrue(state.is_riichi_established(Seat.EAST))
         self.assertTrue(state.is_ippatsu(Seat.EAST))
         self.assertIs(state.phase, RoundPhase.AWAITING_REACTIONS)
-        self.assertTrue(
-            has_action_of_type(state, Seat.NORTH, DaiminkanLegalAction)
-        )
+        self.assertTrue(has_action_of_type(state, Seat.NORTH, DaiminkanLegalAction))
         revision = state.revision
 
         resolution = resolve_with(
