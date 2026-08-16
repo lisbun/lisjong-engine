@@ -2638,7 +2638,20 @@ class RoundStateRinshanDrawTest(unittest.TestCase):
 
 
 class RoundStateKanDoraRevealTest(unittest.TestCase):
-    def test_a_delayed_policy_holds_the_kan_dora_until_the_discard_resolves(
+    """槓ドラの公開タイミングは、槓の種類ごとに異なることを固定する。
+
+    ```text
+    Ankan      policy対象外。成立と同時に公開する
+    Kakan      槍槓が全員パスして成立が確定した時点で公開する
+    Daiminkan  IMMEDIATE: 成立時
+               DELAY:     直後の打牌がロン以外で解決した時
+    ```
+
+    `KanDoraRevealPolicy`で公開タイミングが変わるのは大明槓だけである。
+    加槓の「遅延」は槍槓の解決までであり、次の打牌までは待たない。
+    """
+
+    def test_a_delayed_policy_holds_the_daiminkan_dora_until_the_discard_resolves(
         self,
     ) -> None:
         state = _reaction_state()
@@ -2657,7 +2670,9 @@ class RoundStateKanDoraRevealTest(unittest.TestCase):
         self.assertEqual(state.pending_kan_dora_reveals, ())
         self.assertEqual(len(state.revealed_dora_indicators), revealed_before + 1)
 
-    def test_an_immediate_policy_reveals_the_kan_dora_on_confirmation(self) -> None:
+    def test_an_immediate_policy_reveals_the_daiminkan_dora_on_confirmation(
+        self,
+    ) -> None:
         rules = replace(
             RuleSet.default(),
             kan_dora_reveal_policy=KanDoraRevealPolicy.IMMEDIATE_ON_KAN_CONFIRMATION,
@@ -2673,14 +2688,95 @@ class RoundStateKanDoraRevealTest(unittest.TestCase):
             any(isinstance(event, DoraIndicatorRevealedEvent) for event in state.events)
         )
 
-    def test_a_chankan_keeps_the_delayed_kan_dora_unrevealed(self) -> None:
+    def test_a_delayed_policy_reveals_the_kakan_dora_when_the_chankan_window_closes(
+        self,
+    ) -> None:
+        """加槓は`DELAY_OPEN_KAN_DORA`でも、次の打牌まで公開を待たない。"""
         state = _kakan_declared_state()
+        self.assertIs(
+            state.rules.kan_dora_reveal_policy,
+            KanDoraRevealPolicy.DELAY_OPEN_KAN_DORA,
+        )
         revealed_before = len(state.revealed_dora_indicators)
 
-        resolve_with(state, {Seat.WEST: ron_action(state, Seat.WEST)})
+        resolve_all_pass(state)
 
-        self.assertEqual(len(state.revealed_dora_indicators), revealed_before)
+        self.assertEqual(len(state.revealed_dora_indicators), revealed_before + 1)
         self.assertEqual(state.pending_kan_dora_reveals, ())
+
+    def test_the_kakan_dora_is_not_revealed_again_on_the_following_discard(
+        self,
+    ) -> None:
+        state = _kakan_declared_state()
+        resolve_all_pass(state)
+        revealed_after_confirmation = len(state.revealed_dora_indicators)
+
+        state.draw_rinshan(Seat.SOUTH)
+        discard_drawn_tile(state, Seat.SOUTH)
+        if state.phase is RoundPhase.AWAITING_REACTIONS:
+            resolve_all_pass(state)
+
+        self.assertEqual(
+            len(state.revealed_dora_indicators),
+            revealed_after_confirmation,
+        )
+        self.assertEqual(state.pending_kan_dora_reveals, ())
+
+    def test_an_immediate_policy_reveals_the_kakan_dora_at_the_same_moment(
+        self,
+    ) -> None:
+        rules = replace(
+            RuleSet.default(),
+            kan_dora_reveal_policy=KanDoraRevealPolicy.IMMEDIATE_ON_KAN_CONFIRMATION,
+        )
+        state = _kakan_declared_state(rules=rules)
+        revealed_before = len(state.revealed_dora_indicators)
+
+        resolve_all_pass(state)
+
+        self.assertEqual(len(state.revealed_dora_indicators), revealed_before + 1)
+        self.assertEqual(state.pending_kan_dora_reveals, ())
+
+    def test_a_kakan_never_queues_a_delayed_reveal(self) -> None:
+        """加槓は宣言中も成立後も、大明槓用の保留listへ積まれない。"""
+        state = _kakan_declared_state()
+
+        self.assertEqual(state.pending_kan_dora_reveals, ())
+
+        resolve_all_pass(state)
+
+        self.assertEqual(state.pending_kan_dora_reveals, ())
+
+    def test_an_ankan_reveals_its_dora_under_either_policy(self) -> None:
+        for policy in KanDoraRevealPolicy:
+            with self.subTest(policy=policy):
+                rules = replace(RuleSet.default(), kan_dora_reveal_policy=policy)
+                state = _ankan_state(rules=rules)
+                revealed_before = len(state.revealed_dora_indicators)
+
+                _declare_ankan(state)
+
+                self.assertEqual(
+                    len(state.revealed_dora_indicators),
+                    revealed_before + 1,
+                )
+                self.assertEqual(state.pending_kan_dora_reveals, ())
+
+    def test_a_chankan_never_reveals_the_kakan_dora(self) -> None:
+        """槍槓で加槓が成立しなかった場合、槓ドラは増えず保留にも残らない。"""
+        for policy in KanDoraRevealPolicy:
+            with self.subTest(policy=policy):
+                rules = replace(RuleSet.default(), kan_dora_reveal_policy=policy)
+                state = _kakan_declared_state(rules=rules)
+                revealed_before = len(state.revealed_dora_indicators)
+
+                resolve_with(state, {Seat.WEST: ron_action(state, Seat.WEST)})
+
+                self.assertEqual(
+                    len(state.revealed_dora_indicators),
+                    revealed_before,
+                )
+                self.assertEqual(state.pending_kan_dora_reveals, ())
 
 
 class RoundStatePendingRonResolutionTest(unittest.TestCase):
@@ -2913,6 +3009,245 @@ class RoundStateSuukantsuPaoTest(unittest.TestCase):
         _declare_ankan(state)
 
         self.assertIsNone(state.suukantsu_pao_seat(Seat.EAST))
+
+
+# EASTが3zを打ってSOUTHがポンし、SOUTHがツモを伴わずに7pを打つ局面。
+# その打牌へWESTがロン・チー、NORTHがポンで反応できる。
+_CALLED_DISCARD_HANDS = {
+    Seat.EAST: (
+        "3z",
+        "1m",
+        "9m",
+        "1s",
+        "9s",
+        "1z",
+        "2z",
+        "4z",
+        "5z",
+        "6z",
+        "7z",
+        "1p",
+        "9p",
+    ),
+    Seat.SOUTH: (
+        "3z",
+        "3z",
+        "7p",
+        "1m",
+        "9m",
+        "1s",
+        "9s",
+        "1z",
+        "2z",
+        "4z",
+        "5z",
+        "6z",
+        "7z",
+    ),
+    Seat.WEST: (
+        "2m",
+        "3m",
+        "4m",
+        "5m",
+        "6m",
+        "7m",
+        "2p",
+        "3p",
+        "4p",
+        "5p",
+        "6p",
+        "2s",
+        "2s",
+    ),
+    Seat.NORTH: (
+        "7p",
+        "7p",
+        "1m",
+        "9m",
+        "1s",
+        "9s",
+        "1z",
+        "2z",
+        "4z",
+        "5z",
+        "6z",
+        "7z",
+        "9p",
+    ),
+}
+_CALLED_DISCARD_DRAWS = ("5z",)
+
+
+def _called_discard_state(**kwargs) -> RoundState:
+    """鳴き成立直後のツモなし打牌が、さらに反応windowを開いた局面を返す。"""
+    state = _dealt_state(
+        hands=_CALLED_DISCARD_HANDS,
+        draws=_CALLED_DISCARD_DRAWS,
+        with_dead_wall=True,
+        **kwargs,
+    )
+    draw_and_discard(state, Seat.EAST, "3z")
+    resolve_with(state, {Seat.SOUTH: pon_action(state, Seat.SOUTH)})
+    discard(state, Seat.SOUTH, "7p")
+    return state
+
+
+class RoundStateCalledDiscardReactionTest(unittest.TestCase):
+    """鳴き直後のツモなし打牌でも、反応windowを正常に開けることを固定する。
+
+    `pending_discard_source` は「その打牌の直前にどこからツモったか」という
+    補助的なprovenanceであり、すべての打牌がツモを伴うわけではない。鳴き
+    成立直後の打牌では `None` が正常値であり、打牌そのものの存在条件と
+    同一にしてはならない。
+    """
+
+    def test_a_call_leaves_the_caller_without_a_drawn_tile(self) -> None:
+        state = _dealt_state(
+            hands=_CALLED_DISCARD_HANDS,
+            draws=_CALLED_DISCARD_DRAWS,
+            with_dead_wall=True,
+        )
+        draw_and_discard(state, Seat.EAST, "3z")
+
+        resolve_with(state, {Seat.SOUTH: pon_action(state, Seat.SOUTH)})
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_DISCARD)
+        self.assertIs(state.current_seat, Seat.SOUTH)
+        self.assertIsNone(state.drawn_tile_id)
+        self.assertIsNone(state.drawn_tile_source)
+
+    def test_a_discard_without_a_draw_opens_a_reaction_window(self) -> None:
+        state = _called_discard_state()
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_REACTIONS)
+        self.assertIs(state.pending_discarder, Seat.SOUTH)
+        self.assertIsNotNone(state.pending_discard)
+        self.assertEqual(
+            state.pending_discard.tile.tile_type,
+            _tile_type("7p"),
+        )
+        self.assertIsNone(state.pending_discard_source)
+
+    def test_every_reacting_seat_gets_a_choice(self) -> None:
+        state = _called_discard_state()
+        target_tile_id = state.pending_discard.tile.id
+
+        self.assertEqual(state.reacting_seats, (Seat.WEST, Seat.NORTH, Seat.EAST))
+        for seat in state.reacting_seats:
+            with self.subTest(seat=seat):
+                self.assertIn(
+                    PassLegalAction(ReactionOrigin.DISCARD, target_tile_id),
+                    actions_of(state, seat),
+                )
+        self.assertTrue(has_action_of_type(state, Seat.WEST, RonLegalAction))
+        self.assertTrue(has_action_of_type(state, Seat.NORTH, PonLegalAction))
+        # 反応できないEASTにも、パスだけの選択肢が提示される。
+        self.assertEqual(
+            actions_of(state, Seat.EAST),
+            (PassLegalAction(ReactionOrigin.DISCARD, target_tile_id),),
+        )
+        self.assertEqual(actions_of(state, Seat.SOUTH), ())
+
+    def test_all_reacting_seats_share_the_same_revision(self) -> None:
+        state = _called_discard_state()
+
+        snapshots = [state.legal_actions(seat) for seat in state.reacting_seats]
+
+        self.assertEqual(
+            {snapshot.revision for snapshot in snapshots}, {state.revision}
+        )
+
+    def test_the_window_can_be_closed_by_an_all_pass_batch(self) -> None:
+        state = _called_discard_state()
+        revision = state.revision
+
+        resolution = resolve_all_pass(state)
+
+        self.assertTrue(resolution.all_passed)
+        self.assertIs(state.phase, RoundPhase.AWAITING_DRAW)
+        self.assertIs(state.current_seat, Seat.WEST)
+        self.assertIsNone(state.pending_discard)
+        self.assertIsNone(state.pending_discard_source)
+        self.assertEqual(state.revision, revision + 1)
+
+    def test_the_window_can_resolve_into_a_ron(self) -> None:
+        state = _called_discard_state()
+
+        resolution = resolve_with(state, {Seat.WEST: ron_action(state, Seat.WEST)})
+
+        self.assertIs(resolution.resolved_type, ReactionType.RON)
+        self.assertIs(state.phase, RoundPhase.AWAITING_WIN_FINALIZATION)
+        self.assertEqual(state.pending_ron_resolution.winner_seats, (Seat.WEST,))
+        self.assertIs(state.pending_ron_resolution.source_seat, Seat.SOUTH)
+
+    def test_the_window_can_resolve_into_another_call(self) -> None:
+        state = _called_discard_state()
+
+        resolution = resolve_with(state, {Seat.NORTH: pon_action(state, Seat.NORTH)})
+
+        self.assertIs(resolution.resolved_type, ReactionType.PON)
+        self.assertIs(state.phase, RoundPhase.AWAITING_DISCARD)
+        self.assertIs(state.current_seat, Seat.NORTH)
+        self.assertIsNone(state.drawn_tile_id)
+        self.assertIs(state.discards(Seat.SOUTH)[-1].called_by, Seat.NORTH)
+
+    def test_a_ron_priority_still_beats_the_calls(self) -> None:
+        state = _called_discard_state()
+
+        resolution = resolve_with(
+            state,
+            {
+                Seat.WEST: ron_action(state, Seat.WEST),
+                Seat.NORTH: pon_action(state, Seat.NORTH),
+            },
+        )
+
+        self.assertIs(resolution.resolved_type, ReactionType.RON)
+        self.assertEqual(state.melds(Seat.NORTH), ())
+
+    def test_a_discard_without_a_draw_is_never_a_last_tile_win(self) -> None:
+        """ツモ元のない打牌を`LIVE_WALL`へ補完せず、河底扱いにしない。"""
+        state = _called_discard_state()
+
+        resolve_with(state, {Seat.WEST: ron_action(state, Seat.WEST)})
+
+        self.assertIsNone(state.pending_discard_source)
+        self.assertFalse(state.pending_ron_resolution.is_last_tile)
+
+    def test_a_rejected_batch_leaves_the_window_untouched(self) -> None:
+        state = _called_discard_state()
+        choices = all_pass_choices(state)
+        del choices[Seat.NORTH]
+        original = _capture(state)
+
+        with self.assertRaises(IllegalActionError):
+            state.resolve_reactions(choices, expected_revision=state.revision)
+
+        self.assertEqual(_capture(state), original)
+
+    def test_physical_tiles_are_conserved_through_the_window(self) -> None:
+        state = _called_discard_state()
+        expected_tile_ids = _owned_tile_ids(state)
+
+        resolve_with(state, {Seat.NORTH: pon_action(state, Seat.NORTH)})
+
+        self.assertEqual(_owned_tile_ids(state), expected_tile_ids)
+
+    def test_a_source_less_discard_keeps_the_draw_source_invariant(self) -> None:
+        """`pending_discard_source`があるならpending discardも必ず存在する。"""
+        state = _called_discard_state()
+        original = _capture(state)
+        transition = state._begin()
+        transition.pending_discarder = None
+        transition.pending_discard = None
+        transition.phase = RoundPhase.AWAITING_DRAW
+        transition.current_seat = Seat.WEST
+        transition.pending_discard_source = DrawSource.LIVE_WALL
+
+        with self.assertRaises(RoundInvariantError):
+            state._commit(transition)
+
+        self.assertEqual(_capture(state), original)
 
 
 if __name__ == "__main__":

@@ -257,6 +257,7 @@ def capture(state: RoundState) -> tuple:
         state.revealed_dora_indicators,
         state.pending_discarder,
         state.pending_discard,
+        state.pending_discard_source,
         state.pending_kakan,
         state.pending_ankan,
         state.pending_riichi_declaration,

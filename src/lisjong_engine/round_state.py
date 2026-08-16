@@ -216,6 +216,8 @@ class _Transition:
     drawn_tile_source: DrawSource | None
     pending_discarder: Seat | None
     pending_discard: Discard | None
+    # 保留中の打牌の直前にどこからツモったか。鳴き成立直後のツモを伴わない
+    # 打牌ではNoneになる。
     pending_discard_source: DrawSource | None
     pending_kakan: PendingKakan | None
     pending_ankan: PendingAnkan | None
@@ -368,6 +370,22 @@ class RoundState:
         return self._pending_discard
 
     @property
+    def pending_discard_source(self) -> DrawSource | None:
+        """反応待ちの打牌が、直前のどのツモから出たかを表す補助的な事実。
+
+        ```text
+        LIVE_WALL  通常のツモ後の打牌
+        RINSHAN    嶺上ツモ後の打牌
+        None       鳴き成立直後など、ツモを伴わない打牌
+        ```
+
+        河底ロンの判定はこの値が`LIVE_WALL`かつ山が尽きている場合だけで
+        あり、`None`を`LIVE_WALL`へ補完したり、より前のツモ元から推測したり
+        しない。
+        """
+        return self._pending_discard_source
+
+    @property
     def pending_kakan(self) -> PendingKakan | None:
         """槍槓の解決を待っている加槓。まだ副露へ確定していない。"""
         return self._pending_kakan
@@ -388,10 +406,11 @@ class RoundState:
 
     @property
     def pending_kan_dora_reveals(self) -> tuple[Seat, ...]:
-        """公開を保留している槓ドラの、原因となった槓の宣言者。
+        """公開を保留している槓ドラの、原因となった大明槓の宣言者。
 
-        `KanDoraRevealPolicy.DELAY_OPEN_KAN_DORA`のとき、大明槓・加槓の
-        槓ドラは直後の打牌がロン以外で解決するまで公開しない。
+        `KanDoraRevealPolicy.DELAY_OPEN_KAN_DORA`のとき、大明槓の槓ドラは
+        直後の打牌がロン以外で解決するまで公開しない。暗槓と加槓は成立が
+        確定した時点で公開するため、ここへ積まれることはない。
         """
         return self._pending_kan_dora_reveals
 
@@ -942,8 +961,9 @@ class RoundState:
         transition.pending_discard_source = None
         if resolution.resolved_type is ReactionType.DAIMINKAN:
             # 大明槓自体には槍槓が無く、この時点で成立が確定している。
+            # ただし槓ドラの公開タイミングだけは`KanDoraRevealPolicy`に従う。
             new_events.append(KanConfirmedEvent(seat, meld))
-            new_events.extend(self._confirm_kan_dora(transition, seat))
+            new_events.extend(self._confirm_daiminkan_dora(transition, seat))
             transition.phase = RoundPhase.AWAITING_RINSHAN_DRAW
         else:
             # 鳴き後の打牌はツモを伴わないため、drawn tileのない
@@ -972,6 +992,10 @@ class RoundState:
         if committed != kakan:
             raise RoundInvariantError("the pending kakan no longer matches the hand")
 
+        # 加槓の公開は、槍槓が全員パスして成立が確定したこの時点で行う。
+        # `DELAY_OPEN_KAN_DORA`の「遅延」は槍槓の解決までを指すため、
+        # 大明槓のように次の打牌までは待たない。槍槓が成立した場合は加槓
+        # 自体が成立せず、この経路へ到達しない。
         transition.drawn_tile_id = None
         transition.drawn_tile_source = None
         transition.current_seat = seat
@@ -979,7 +1003,7 @@ class RoundState:
         transition.events = transition.events.appended(
             (
                 KanConfirmedEvent(seat, committed),
-                *self._confirm_kan_dora(transition, seat),
+                *self._reveal_kan_dora(transition, seat),
             )
         )
 
@@ -997,7 +1021,6 @@ class RoundState:
 
         # 暗槓には（国士無双の槍槓を除き）槍槓が無いため、成立と同時に
         # 槓ドラを公開する。この公開は`KanDoraRevealPolicy`の対象外である。
-        indicator = transition.wall.reveal_kan_dora()
         transition.drawn_tile_id = None
         transition.drawn_tile_source = None
         transition.current_seat = seat
@@ -1005,22 +1028,41 @@ class RoundState:
         transition.events = transition.events.appended(
             (
                 KanConfirmedEvent(seat, committed),
-                DoraIndicatorRevealedEvent(seat, indicator),
+                *self._reveal_kan_dora(transition, seat),
             )
         )
 
-    def _confirm_kan_dora(
+    @staticmethod
+    def _reveal_kan_dora(
+        transition: _Transition,
+        seat: Seat,
+    ) -> tuple[DoraIndicatorRevealedEvent, ...]:
+        """槓ドラ表示牌を直ちに1枚公開する。"""
+        indicator = transition.wall.reveal_kan_dora()
+        return (DoraIndicatorRevealedEvent(seat, indicator),)
+
+    def _confirm_daiminkan_dora(
         self,
         transition: _Transition,
         seat: Seat,
     ) -> tuple[DoraIndicatorRevealedEvent, ...]:
-        """大明槓・加槓の成立確定時に、公開タイミングpolicyへ従う。"""
+        """大明槓の槓ドラ公開を`KanDoraRevealPolicy`へ従わせる。
+
+        大明槓は成立と同時に確定するが、`DELAY_OPEN_KAN_DORA`では直後の
+        打牌がロン以外で解決するまで公開を保留する。3種類の槓のうち、この
+        policyで公開タイミングが変わるのは大明槓だけである。
+
+        ```text
+        Ankan      policy対象外。成立と同時に公開する
+        Kakan      槍槓が全員パスした時点で公開する（policyによらない）
+        Daiminkan  IMMEDIATE: 成立時 / DELAY: 直後の打牌がロン以外で解決した時
+        ```
+        """
         if (
             self._rules.kan_dora_reveal_policy
             is KanDoraRevealPolicy.IMMEDIATE_ON_KAN_CONFIRMATION
         ):
-            indicator = transition.wall.reveal_kan_dora()
-            return (DoraIndicatorRevealedEvent(seat, indicator),)
+            return self._reveal_kan_dora(transition, seat)
         transition.pending_kan_dora_reveals = (
             *transition.pending_kan_dora_reveals,
             seat,
@@ -1028,7 +1070,7 @@ class RoundState:
         return ()
 
     def _release_pending_kan_dora(self, transition: _Transition) -> None:
-        """保留していた槓ドラを、まとめて公開する。"""
+        """保留していた大明槓の槓ドラを、まとめて公開する。"""
         if not transition.pending_kan_dora_reveals:
             return
         new_events = []
@@ -1257,9 +1299,14 @@ class RoundState:
             raise RoundInvariantError(
                 "a pending discard is held exactly while awaiting reactions"
             )
-        if has_pending_discard is not (transition.pending_discard_source is not None):
+        # `pending_discard_source`は「その打牌の直前にどこからツモったか」と
+        # いう補助的なprovenanceであり、すべての打牌がツモを伴うわけでは
+        # ない。鳴き成立直後のツモなし打牌ではNoneが正常値である。したがって
+        # pending discardの存在条件とsourceの存在条件を同一にせず、sourceが
+        # あるならその打牌も保持されている、という片方向の含意だけを検証する。
+        if transition.pending_discard_source is not None and not has_pending_discard:
             raise RoundInvariantError(
-                "a pending discard and its draw source are held together"
+                "a pending draw source requires the pending discard it came from"
             )
 
         for pending, pending_phase, description in (
