@@ -1122,6 +1122,44 @@ class RoundStateInvariantGuardTest(unittest.TestCase):
         self.assertIs(state.phase, RoundPhase.AWAITING_RINSHAN_DRAW)
         self.assertIs(state.current_seat, Seat.EAST)
 
+    def test_allows_awaiting_kakan_reactions_with_a_current_seat(self) -> None:
+        """加槓宣言後、槍槓reactionを待つ間もcurrent seatを保持できることを固定する。
+
+        E1は加槓を実装しないが、`AWAITING_KAKAN_REACTIONS` はE2で
+        加槓を宣言したseatを`current_seat`として保持したまま槍槓の反応を
+        待つ正常なphaseであり、invariantがcurrent seatありというだけで
+        拒否してはならない。
+        """
+        state = _quiet_state()
+        transition = state._begin()
+        transition.phase = RoundPhase.AWAITING_KAKAN_REACTIONS
+        transition.current_seat = Seat.EAST
+        transition.drawn_tile_id = None
+
+        state._commit(transition)
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_KAKAN_REACTIONS)
+        self.assertIs(state.current_seat, Seat.EAST)
+
+    def test_allows_awaiting_ankan_reactions_with_a_current_seat(self) -> None:
+        """暗槓宣言後、槍槓reactionを待つ間もcurrent seatを保持できることを固定する。
+
+        E1は暗槓を実装しないが、`AWAITING_ANKAN_REACTIONS` はE2で
+        暗槓を宣言したseatを`current_seat`として保持したまま
+        （国士無双限定の）槍槓の反応を待つ正常なphaseであり、invariantが
+        current seatありというだけで拒否してはならない。
+        """
+        state = _quiet_state()
+        transition = state._begin()
+        transition.phase = RoundPhase.AWAITING_ANKAN_REACTIONS
+        transition.current_seat = Seat.EAST
+        transition.drawn_tile_id = None
+
+        state._commit(transition)
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_ANKAN_REACTIONS)
+        self.assertIs(state.current_seat, Seat.EAST)
+
     def test_rejects_a_drawn_tile_reference_outside_the_discard_phase(self) -> None:
         state = _quiet_state()
         drawn_tile = state.draw(Seat.EAST)

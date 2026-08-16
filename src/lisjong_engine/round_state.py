@@ -435,13 +435,17 @@ class RoundState:
     def _validate_phase_consistency(self, transition: _Transition) -> None:
         phase = transition.phase
         # E1が到達するphaseだけでなく、`RoundPhase`が意味として現在seatを
-        # 要求するphase全体を対象にする。`AWAITING_RINSHAN_DRAW`はE1では
-        # 未到達だが、E2の槓成立後は嶺上牌を引くseatをcurrent seatとして
-        # 保持する正常状態であり、ここで一般化して禁止してはならない。
+        # 要求するphase全体を対象にする。`AWAITING_RINSHAN_DRAW`・
+        # `AWAITING_KAKAN_REACTIONS`・`AWAITING_ANKAN_REACTIONS`はE1では
+        # 未到達だが、E2では槓・加槓・暗槓を宣言したseatをcurrent seatとして
+        # 保持したまま槍槓等の反応を待つ正常状態であり、ここで一般化して
+        # 禁止してはならない。
         expects_current_seat = phase in (
             RoundPhase.AWAITING_DRAW,
             RoundPhase.AWAITING_DISCARD,
             RoundPhase.AWAITING_RINSHAN_DRAW,
+            RoundPhase.AWAITING_KAKAN_REACTIONS,
+            RoundPhase.AWAITING_ANKAN_REACTIONS,
         )
 
         if expects_current_seat and transition.current_seat is None:
