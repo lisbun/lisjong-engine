@@ -36,6 +36,7 @@ from lisjong_engine.furiten import FuritenReason
 from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
+    DaiminkanLegalAction,
     DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
@@ -80,8 +81,15 @@ from lisjong_engine.rules import KanDoraRevealPolicy, RonResolutionPolicy, RuleS
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import STANDARD_TILES, Tile
 from lisjong_engine.wall import Wall, create_shuffled_wall
-from lisjong_engine.win_context import RiichiStatus
+from lisjong_engine.win_context import (
+    RiichiStatus,
+    WinMethod,
+    WinningContext,
+    WinOrigin,
+)
 from lisjong_engine.wind import Wind
+from lisjong_engine.yaku import Yaku
+from lisjong_engine.yaku_evaluation import evaluate_yaku
 
 _QUIET_HANDS = QUIET_HANDS
 _QUIET_DRAWS = QUIET_DRAWS
@@ -2390,18 +2398,6 @@ class RoundStateFuritenTest(unittest.TestCase):
         self.assertIn(Seat.WEST, state.reacting_seats)
         self.assertFalse(has_action_of_type(state, Seat.WEST, RonLegalAction))
 
-    def test_a_kan_declaration_cancels_every_ippatsu_window(self) -> None:
-        """槓の宣言自体で一発は消える。槍槓で槓が流れるかどうかとは独立する。"""
-        state = _riichi_declaration_state()
-        resolve_all_pass(state)
-        self.assertTrue(state.is_ippatsu(Seat.EAST))
-
-        state.draw(Seat.SOUTH)
-        _declare_ankan(state, Seat.SOUTH)
-
-        self.assertFalse(state.is_ippatsu(Seat.EAST))
-        self.assertTrue(state.is_riichi_established(Seat.EAST))
-
     def test_a_call_by_another_seat_cancels_an_ippatsu_window(self) -> None:
         state = _riichi_declaration_state()
         resolve_all_pass(state)
@@ -2959,12 +2955,20 @@ _SUUKANTSU_DEAD_WALL = (
 )
 
 
-def _three_ankan_state() -> RoundState:
+# 四槓子をパオ対象へ含めたルールセット。既定では対象外である。
+_SUUKANTSU_PAO_RULES = replace(
+    RuleSet.default(),
+    pao_yaku=RuleSet.default().pao_yaku | {Yaku.SUUKANTSU},
+)
+
+
+def _three_ankan_state(*, rules: RuleSet | None = None) -> RoundState:
     """NORTHが暗槓を3つ持ち、4pを3枚抱えた局面を返す。"""
     state = _dealt_state(
         hands=_SUUKANTSU_HANDS,
         draws=_SUUKANTSU_DRAWS,
         dead_wall=_SUUKANTSU_DEAD_WALL,
+        rules=rules,
     )
     for _ in range(3):
         play_quiet_turn(state)
@@ -2981,17 +2985,14 @@ class RoundStateSuukantsuPaoTest(unittest.TestCase):
     加槓は元のポンの位置で差し替わるため、和了時点の副露の並びからは
     「大明槓の時点で既に3槓あったか」を復元できない。E3が必要とする事実を
     失わないよう、E2で成立時点の判断を記録する。
+
+    ただし記録するのは責任払いが実際に成立する場合だけであり、対象役は
+    `RuleSet.pao_enabled`と`pao_yaku`が決める。
     """
 
-    def test_no_seat_owes_pao_before_the_fourth_kan(self) -> None:
-        state = _three_ankan_state()
-
-        for seat in Seat:
-            with self.subTest(seat=seat):
-                self.assertIsNone(state.suukantsu_pao_seat(seat))
-
-    def test_the_discarder_of_the_fourth_kan_owes_pao(self) -> None:
-        state = _three_ankan_state()
+    def _four_kan_state(self, *, rules: RuleSet | None = None) -> RoundState:
+        """NORTHが3暗槓のあと、EASTの4pを大明槓して四槓子を確定させる。"""
+        state = _three_ankan_state(rules=rules)
         discard(state, Seat.NORTH, "7s")
         if state.phase is RoundPhase.AWAITING_REACTIONS:
             resolve_all_pass(state)
@@ -2999,16 +3000,61 @@ class RoundStateSuukantsuPaoTest(unittest.TestCase):
 
         resolve_with(state, {Seat.NORTH: daiminkan_action(state, Seat.NORTH)})
 
-        self.assertIs(state.suukantsu_pao_seat(Seat.NORTH), Seat.EAST)
         self.assertEqual(len(state.melds(Seat.NORTH)), 4)
         self.assertIs(state.phase, RoundPhase.AWAITING_RINSHAN_DRAW)
+        return state
+
+    def test_no_seat_owes_pao_before_the_fourth_kan(self) -> None:
+        state = _three_ankan_state(rules=_SUUKANTSU_PAO_RULES)
+
+        for seat in Seat:
+            with self.subTest(seat=seat):
+                self.assertIsNone(state.suukantsu_pao_seat(seat))
+
+    def test_the_default_rules_do_not_make_suukantsu_a_pao_yaku(self) -> None:
+        """既定のルールセットは大三元と大四喜だけをパオ対象にする。"""
+        self.assertNotIn(Yaku.SUUKANTSU, RuleSet.default().pao_yaku)
+
+        state = self._four_kan_state()
+
+        for seat in Seat:
+            with self.subTest(seat=seat):
+                self.assertIsNone(state.suukantsu_pao_seat(seat))
+
+    def test_the_discarder_of_the_fourth_kan_owes_pao_when_the_rules_say_so(
+        self,
+    ) -> None:
+        state = self._four_kan_state(rules=_SUUKANTSU_PAO_RULES)
+
+        self.assertIs(state.suukantsu_pao_seat(Seat.NORTH), Seat.EAST)
+
+    def test_disabled_pao_rules_never_record_a_responsible_seat(self) -> None:
+        rules = replace(_SUUKANTSU_PAO_RULES, pao_enabled=False)
+
+        state = self._four_kan_state(rules=rules)
+
+        for seat in Seat:
+            with self.subTest(seat=seat):
+                self.assertIsNone(state.suukantsu_pao_seat(seat))
 
     def test_an_ankan_never_creates_a_pao_obligation(self) -> None:
-        state = _ankan_state()
+        for rules in (None, _SUUKANTSU_PAO_RULES):
+            with self.subTest(rules=rules):
+                state = _ankan_state(rules=rules)
 
-        _declare_ankan(state)
+                _declare_ankan(state)
 
-        self.assertIsNone(state.suukantsu_pao_seat(Seat.EAST))
+                self.assertIsNone(state.suukantsu_pao_seat(Seat.EAST))
+
+    def test_a_kakan_never_creates_a_pao_obligation(self) -> None:
+        state = _kakan_declared_state(rules=_SUUKANTSU_PAO_RULES)
+
+        resolve_all_pass(state)
+
+        self.assertEqual([type(meld) for meld in state.melds(Seat.SOUTH)], [Kakan])
+        for seat in Seat:
+            with self.subTest(seat=seat):
+                self.assertIsNone(state.suukantsu_pao_seat(seat))
 
 
 # EASTが3zを打ってSOUTHがポンし、SOUTHがツモを伴わずに7pを打つ局面。
@@ -3248,6 +3294,207 @@ class RoundStateCalledDiscardReactionTest(unittest.TestCase):
             state._commit(transition)
 
         self.assertEqual(_capture(state), original)
+
+
+# EASTが1mの暗槓材料を持ち、NORTHが1m単騎の国士無双で立直できる局面用の
+# ツモ順。全員が1巡目をツモ切りし、NORTHが立直を宣言してからEASTが暗槓
+# できるようにする。
+_ANKAN_RIICHI_DRAWS = ("8s", "8s", "8s", "8s", "8m")
+
+
+def _riichi_before_kakan_state(**kwargs) -> RoundState:
+    """WESTが立直（一発中）のまま、SOUTHが加槓を宣言した局面を返す。
+
+    ポンはWESTの立直より前に済ませてあるため、加槓宣言の時点でWESTの
+    一発windowはまだ開いている。
+    """
+    state = _dealt_state(
+        hands=_KAKAN_HANDS,
+        draws=_KAKAN_DRAWS,
+        with_dead_wall=True,
+        **kwargs,
+    )
+    draw_and_discard(state, Seat.EAST, "3p")
+    resolve_with(state, {Seat.SOUTH: pon_action(state, Seat.SOUTH)})
+    discard(state, Seat.SOUTH, "1z")
+    state.draw(Seat.WEST)
+    discard(state, Seat.WEST, "9s", declaration=DiscardDeclaration.RIICHI)
+    play_quiet_turn(state)
+    play_quiet_turn(state)
+    state.draw(Seat.SOUTH)
+    snapshot = state.legal_actions(Seat.SOUTH)
+    state.apply(
+        Seat.SOUTH,
+        action_of_type(state, Seat.SOUTH, KakanLegalAction),
+        expected_revision=snapshot.revision,
+    )
+    return state
+
+
+def _riichi_before_ankan_state(**kwargs) -> RoundState:
+    """NORTHが国士無双で立直（一発中）のまま、EASTが暗槓を宣言した局面。"""
+    state = _dealt_state(
+        hands=_ANKAN_HANDS,
+        draws=_ANKAN_RIICHI_DRAWS,
+        with_dead_wall=True,
+        **kwargs,
+    )
+    for _ in range(3):
+        play_quiet_turn(state)
+    state.draw(Seat.NORTH)
+    snapshot = state.legal_actions(Seat.NORTH)
+    state.apply(
+        Seat.NORTH,
+        next(
+            action
+            for action in snapshot.actions
+            if isinstance(action, DiscardLegalAction)
+            and action.declaration is DiscardDeclaration.RIICHI
+        ),
+        expected_revision=snapshot.revision,
+    )
+    if state.phase is RoundPhase.AWAITING_REACTIONS:
+        resolve_all_pass(state)
+    state.draw(Seat.EAST)
+    _declare_ankan(state, Seat.EAST)
+    return state
+
+
+class RoundStateKanIppatsuTest(unittest.TestCase):
+    """一発を終わらせるのは槓の「宣言」ではなく「成立」であることを固定する。
+
+    槍槓で流れた加槓・暗槓はそもそも成立していないため、和了者は
+    `RIICHI + IPPATSU + CHANKAN` のまま和了できなければならない。
+    """
+
+    def test_a_kakan_declaration_does_not_cancel_ippatsu(self) -> None:
+        state = _riichi_before_kakan_state()
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_KAKAN_REACTIONS)
+        self.assertTrue(state.is_riichi_established(Seat.WEST))
+        self.assertTrue(state.is_ippatsu(Seat.WEST))
+
+    def test_a_chankan_ron_preserves_the_winner_ippatsu(self) -> None:
+        state = _riichi_before_kakan_state()
+
+        resolution = resolve_with(state, {Seat.WEST: ron_action(state, Seat.WEST)})
+
+        self.assertIs(resolution.origin, ReactionOrigin.KAKAN)
+        self.assertIs(state.phase, RoundPhase.AWAITING_WIN_FINALIZATION)
+        self.assertEqual(state.pending_ron_resolution.winner_seats, (Seat.WEST,))
+        self.assertTrue(state.is_ippatsu(Seat.WEST))
+        self.assertIs(state.riichi_status(Seat.WEST), RiichiStatus.RIICHI)
+        # 加槓は成立せず、元のポンが残る。
+        self.assertEqual([type(meld) for meld in state.melds(Seat.SOUTH)], [Pon])
+        self.assertIsNone(state.pending_kakan)
+
+    def test_the_chankan_facts_build_a_riichi_ippatsu_chankan_context(self) -> None:
+        """E3が`RIICHI + IPPATSU + CHANKAN`を構築できることを確認する。
+
+        点数確定はE3の責務のため、ここでは`WinningContext`と役の成立まで
+        だけを確認し、`RoundResult`や精算へは踏み込まない。
+        """
+        state = _riichi_before_kakan_state()
+        resolve_with(state, {Seat.WEST: ron_action(state, Seat.WEST)})
+        pending = state.pending_ron_resolution
+        winner = pending.winner_seats[0]
+
+        context = WinningContext(
+            concealed_tiles=(*state.hand_tiles(winner), pending.target_tile),
+            winning_tile=pending.target_tile,
+            method=WinMethod.RON,
+            origin=WinOrigin.KAKAN,
+            seat_wind=state.seat_wind(winner),
+            prevailing_wind=state.prevailing_wind,
+            declared_melds=state.melds(winner),
+            riichi_status=state.riichi_status(winner),
+            is_ippatsu=state.is_ippatsu(winner),
+        )
+        yakus = frozenset(
+            yaku
+            for evaluation in evaluate_yaku(context, state.rules)
+            for yaku in evaluation.yakus
+        )
+
+        self.assertIn(Yaku.RIICHI, yakus)
+        self.assertIn(Yaku.IPPATSU, yakus)
+        self.assertIn(Yaku.CHANKAN, yakus)
+
+    def test_a_confirmed_kakan_cancels_ippatsu(self) -> None:
+        state = _riichi_before_kakan_state()
+        revision = state.revision
+
+        resolve_all_pass(state)
+
+        self.assertFalse(state.is_ippatsu(Seat.WEST))
+        self.assertTrue(state.is_riichi_established(Seat.WEST))
+        self.assertIs(state.phase, RoundPhase.AWAITING_RINSHAN_DRAW)
+        self.assertEqual([type(meld) for meld in state.melds(Seat.SOUTH)], [Kakan])
+        self.assertEqual(state.revision, revision + 1)
+
+    def test_an_ankan_declaration_does_not_cancel_ippatsu(self) -> None:
+        state = _riichi_before_ankan_state(rules=_KOKUSHI_CHANKAN_RULES)
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_ANKAN_REACTIONS)
+        self.assertTrue(state.is_ippatsu(Seat.NORTH))
+        self.assertEqual(state.melds(Seat.EAST), ())
+
+    def test_an_ankan_chankan_ron_preserves_the_winner_ippatsu(self) -> None:
+        state = _riichi_before_ankan_state(rules=_KOKUSHI_CHANKAN_RULES)
+
+        resolution = resolve_with(state, {Seat.NORTH: ron_action(state, Seat.NORTH)})
+
+        self.assertIs(resolution.origin, ReactionOrigin.ANKAN)
+        self.assertIs(state.phase, RoundPhase.AWAITING_WIN_FINALIZATION)
+        self.assertEqual(state.pending_ron_resolution.winner_seats, (Seat.NORTH,))
+        self.assertTrue(state.is_ippatsu(Seat.NORTH))
+        self.assertIs(state.riichi_status(Seat.NORTH), RiichiStatus.DOUBLE_RIICHI)
+        # 暗槓は成立せず、4枚は宣言者の手牌に残る。
+        self.assertEqual(state.melds(Seat.EAST), ())
+        self.assertIsNone(state.pending_ankan)
+
+    def test_a_confirmed_ankan_cancels_ippatsu(self) -> None:
+        state = _riichi_before_ankan_state(rules=_KOKUSHI_CHANKAN_RULES)
+
+        resolve_all_pass(state)
+
+        self.assertFalse(state.is_ippatsu(Seat.NORTH))
+        self.assertTrue(state.is_riichi_established(Seat.NORTH))
+        self.assertEqual([type(meld) for meld in state.melds(Seat.EAST)], [Ankan])
+
+    def test_an_ankan_without_a_chankan_candidate_cancels_ippatsu_at_once(self) -> None:
+        """槍槓候補がない暗槓は、宣言と成立が同じtransactionで完了する。"""
+        state = _riichi_before_ankan_state()
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_RINSHAN_DRAW)
+        self.assertEqual([type(meld) for meld in state.melds(Seat.EAST)], [Ankan])
+        self.assertFalse(state.is_ippatsu(Seat.NORTH))
+        self.assertTrue(state.is_riichi_established(Seat.NORTH))
+
+    def test_a_daiminkan_still_cancels_ippatsu_on_the_spot(self) -> None:
+        """大明槓は打牌への反応として即座に成立するため、その場で一発を消す。"""
+        state = _riichi_declaration_state()
+        resolve_all_pass(state)
+        self.assertTrue(state.is_ippatsu(Seat.EAST))
+
+        draw_and_discard(state, Seat.SOUTH, "7p")
+        self.assertFalse(has_action_of_type(state, Seat.NORTH, DaiminkanLegalAction))
+        resolve_with(state, {Seat.NORTH: pon_action(state, Seat.NORTH)})
+
+        self.assertFalse(state.is_ippatsu(Seat.EAST))
+
+    def test_a_failed_chankan_batch_leaves_ippatsu_untouched(self) -> None:
+        state = _riichi_before_kakan_state()
+        original = _capture(state)
+        choices = all_pass_choices(state)
+        del choices[Seat.EAST]
+
+        with self.assertRaises(IllegalActionError):
+            state.resolve_reactions(choices, expected_revision=state.revision)
+
+        self.assertEqual(_capture(state), original)
+        self.assertTrue(state.is_ippatsu(Seat.WEST))
+        self.assertIsNotNone(state.pending_kakan)
 
 
 if __name__ == "__main__":

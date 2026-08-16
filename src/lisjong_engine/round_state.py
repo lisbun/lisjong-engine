@@ -107,6 +107,7 @@ from lisjong_engine.tile import Tile
 from lisjong_engine.wall import Wall
 from lisjong_engine.win_context import RiichiStatus
 from lisjong_engine.wind import Wind
+from lisjong_engine.yaku import Yaku
 
 _SEAT_ORDER = tuple(Seat)
 _DEAL_BLOCK_SIZE = 4
@@ -440,6 +441,16 @@ class RoundState:
         return MappingProxyType(deltas)
 
     @property
+    def _suukantsu_pao_enabled(self) -> bool:
+        """このルールで四槓子の責任払いが成立し得るかを返す。
+
+        パオの対象役は`RuleSet`の設定値であり、既定のルールセットは大三元と
+        大四喜だけを対象にする。四槓子を対象へ含めるかどうかをmechanics側で
+        推測せず、必ず`pao_enabled`と`pao_yaku`へ従う。
+        """
+        return self._rules.pao_enabled and Yaku.SUUKANTSU in self._rules.pao_yaku
+
+    @property
     def has_meld_occurred(self) -> bool:
         return any(player.melds for player in self._players.values())
 
@@ -507,6 +518,10 @@ class RoundState:
         責任の成立は大明槓の成立時点でしか判定できない。加槓は元のポンの
         位置で差し替わるため、和了時点の副露の並びからは復元できないため
         である。
+
+        記録するのは責任払いが実際に成立する場合だけであり、
+        `RuleSet.pao_enabled`と`pao_yaku`が四槓子を対象にしていなければ、
+        4つ目の槓子が大明槓で確定してもNoneのままになる。
         """
         self._validate_seat(seat)
         return self._suukantsu_pao_seats.get(seat)
@@ -819,8 +834,8 @@ class RoundState:
         # 成立しない可能性があるため、この時点では手牌を減らさない。
         ankan = transition.players[seat].copy().declare_ankan(action.tile_ids)
         pending = PendingAnkan(seat, ankan)
-        # 槓の宣言自体で一発は消える。槍槓候補の有無に関わらず確定させる。
-        self._cancel_all_ippatsu(transition)
+        # 一発を消すのは槓の宣言ではなく成立である。槍槓で暗槓が流れた場合、
+        # その槓は無かったことになるため一発windowも維持する。
         transition.events = transition.events.appended((KanDeclaredEvent(seat, ankan),))
 
         transition.pending_ankan = pending
@@ -840,7 +855,8 @@ class RoundState:
         # 元のポンをここで書き換えない。加槓は値として保留し、槍槓が全員
         # パスされてから初めて副露へ差し替える。
         kakan = transition.players[seat].copy().declare_kakan(action.added_tile_id)
-        self._cancel_all_ippatsu(transition)
+        # 一発を消すのは槓の宣言ではなく成立である。槍槓で加槓が流れた場合、
+        # 和了者は`RIICHI + IPPATSU + CHANKAN`のまま和了できる。
         transition.events = transition.events.appended((KanDeclaredEvent(seat, kakan),))
 
         transition.pending_kakan = PendingKakan(seat, kakan)
@@ -946,7 +962,7 @@ class RoundState:
                 action.consumed_tile_ids,
                 discarder,
             )
-            if completes_four_kans:
+            if completes_four_kans and self._suukantsu_pao_enabled:
                 transition.suukantsu_pao_seats[seat] = discarder
 
         transition.players[discarder].mark_discard_called(discard.tile.id, seat)
@@ -996,6 +1012,7 @@ class RoundState:
         # `DELAY_OPEN_KAN_DORA`の「遅延」は槍槓の解決までを指すため、
         # 大明槓のように次の打牌までは待たない。槍槓が成立した場合は加槓
         # 自体が成立せず、この経路へ到達しない。
+        self._cancel_all_ippatsu(transition)
         transition.drawn_tile_id = None
         transition.drawn_tile_source = None
         transition.current_seat = seat
@@ -1021,6 +1038,7 @@ class RoundState:
 
         # 暗槓には（国士無双の槍槓を除き）槍槓が無いため、成立と同時に
         # 槓ドラを公開する。この公開は`KanDoraRevealPolicy`の対象外である。
+        self._cancel_all_ippatsu(transition)
         transition.drawn_tile_id = None
         transition.drawn_tile_source = None
         transition.current_seat = seat
@@ -1138,6 +1156,18 @@ class RoundState:
 
     @staticmethod
     def _cancel_all_ippatsu(transition: _Transition) -> None:
+        """成立した割り込みにより、全席の一発windowを終了する。
+
+        一発を消すのは「宣言」ではなく「成立」である。
+
+        ```text
+        Chi / Pon / Daiminkan  成立時に終了
+        Kakan / Ankan          槍槓が解決して成立が確定した時点で終了
+        槍槓で流れたKakan/Ankan 成立していないため一発を維持する
+        ```
+
+        立直した席自身の次の打牌による自然失効は`_apply_discard()`が扱う。
+        """
         for player in transition.players.values():
             player.cancel_ippatsu()
 
