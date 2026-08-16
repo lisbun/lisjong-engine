@@ -434,9 +434,14 @@ class RoundState:
 
     def _validate_phase_consistency(self, transition: _Transition) -> None:
         phase = transition.phase
+        # E1が到達するphaseだけでなく、`RoundPhase`が意味として現在seatを
+        # 要求するphase全体を対象にする。`AWAITING_RINSHAN_DRAW`はE1では
+        # 未到達だが、E2の槓成立後は嶺上牌を引くseatをcurrent seatとして
+        # 保持する正常状態であり、ここで一般化して禁止してはならない。
         expects_current_seat = phase in (
             RoundPhase.AWAITING_DRAW,
             RoundPhase.AWAITING_DISCARD,
+            RoundPhase.AWAITING_RINSHAN_DRAW,
         )
 
         if expects_current_seat and transition.current_seat is None:
@@ -444,18 +449,22 @@ class RoundState:
         if not expects_current_seat and transition.current_seat is not None:
             raise RoundInvariantError(f"{phase.value} must not have a current seat")
 
-        has_drawn_tile = transition.drawn_tile_id is not None
-        if has_drawn_tile is not (phase is RoundPhase.AWAITING_DISCARD):
-            raise RoundInvariantError(
-                "a drawn tile reference is held exactly while awaiting a discard"
-            )
-        if has_drawn_tile and all(
-            tile.id != transition.drawn_tile_id
-            for tile in transition.players[transition.current_seat].hand_tiles
-        ):
-            raise RoundInvariantError(
-                "the drawn tile must be owned by the current hand"
-            )
+        if transition.drawn_tile_id is not None:
+            # drawn tileがあれば必ずAWAITING_DISCARDである、という片方向の
+            # 含意だけを検証する。逆方向（AWAITING_DISCARDなら必ずdrawn
+            # tileがある）は要求しない。鳴き成立後の打牌はツモを伴わない
+            # 正常なAWAITING_DISCARDだからである。
+            if phase is not RoundPhase.AWAITING_DISCARD:
+                raise RoundInvariantError(
+                    "a drawn tile reference can only be held while awaiting a discard"
+                )
+            if all(
+                tile.id != transition.drawn_tile_id
+                for tile in transition.players[transition.current_seat].hand_tiles
+            ):
+                raise RoundInvariantError(
+                    "the drawn tile must be owned by the current hand"
+                )
 
         has_pending_discard = transition.pending_discard is not None
         if has_pending_discard is not (transition.pending_discarder is not None):

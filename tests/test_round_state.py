@@ -1063,7 +1063,7 @@ class RoundStateInvariantGuardTest(unittest.TestCase):
         state = _quiet_state()
         original = _capture(state)
         transition = state._begin()
-        transition.phase = RoundPhase.AWAITING_DISCARD
+        transition.phase = RoundPhase.AWAITING_REACTIONS
 
         with self.assertRaises(RoundInvariantError):
             state._commit(transition)
@@ -1079,6 +1079,103 @@ class RoundStateInvariantGuardTest(unittest.TestCase):
             state.hand_tiles(Seat.EAST)[0],
             is_tsumogiri=False,
         )
+
+        with self.assertRaises(RoundInvariantError):
+            state._commit(transition)
+
+        self.assertEqual(_capture(state), original)
+
+    def test_allows_awaiting_discard_without_a_drawn_tile(self) -> None:
+        """鳴き成立直後の打牌（ツモを伴わない）を将来禁止しないことを固定する。
+
+        E1はチー・ポンを実装しないが、成立後の状態は
+        `phase = AWAITING_DISCARD` かつ `drawn_tile_id = None` であり、
+        invariantがこれを一般的に拒否してはならない。
+        """
+        state = _quiet_state()
+        transition = state._begin()
+        transition.phase = RoundPhase.AWAITING_DISCARD
+        transition.current_seat = Seat.EAST
+        transition.drawn_tile_id = None
+
+        state._commit(transition)
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_DISCARD)
+        self.assertIs(state.current_seat, Seat.EAST)
+        self.assertIsNone(state.drawn_tile_id)
+
+    def test_allows_awaiting_rinshan_draw_with_a_current_seat(self) -> None:
+        """槓成立後、嶺上牌を引くseatをcurrent seatとして保持できることを固定する。
+
+        E1は槓を実装しないが、`AWAITING_RINSHAN_DRAW` はE2で
+        `current_seat` を要求する正常なphaseであり、invariantが
+        current seatありというだけで拒否してはならない。
+        """
+        state = _quiet_state()
+        transition = state._begin()
+        transition.phase = RoundPhase.AWAITING_RINSHAN_DRAW
+        transition.current_seat = Seat.EAST
+        transition.drawn_tile_id = None
+
+        state._commit(transition)
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_RINSHAN_DRAW)
+        self.assertIs(state.current_seat, Seat.EAST)
+
+    def test_rejects_a_drawn_tile_reference_outside_the_discard_phase(self) -> None:
+        state = _quiet_state()
+        drawn_tile = state.draw(Seat.EAST)
+        original = _capture(state)
+        transition = state._begin()
+        transition.phase = RoundPhase.AWAITING_RINSHAN_DRAW
+
+        with self.assertRaises(RoundInvariantError):
+            state._commit(transition)
+
+        self.assertEqual(_capture(state), original)
+        self.assertEqual(state.drawn_tile_id, drawn_tile.id)
+
+    def test_rejects_a_drawn_tile_not_owned_by_the_current_hand(self) -> None:
+        state = _quiet_state()
+        state.draw(Seat.EAST)
+        original = _capture(state)
+        transition = state._begin()
+        transition.drawn_tile_id = state.hand_tiles(Seat.SOUTH)[0].id
+
+        with self.assertRaises(RoundInvariantError):
+            state._commit(transition)
+
+        self.assertEqual(_capture(state), original)
+
+    def test_rejects_awaiting_draw_without_a_current_seat(self) -> None:
+        state = _quiet_state()
+        original = _capture(state)
+        transition = state._begin()
+        transition.current_seat = None
+
+        with self.assertRaises(RoundInvariantError):
+            state._commit(transition)
+
+        self.assertEqual(_capture(state), original)
+
+    def test_rejects_awaiting_discard_without_a_current_seat(self) -> None:
+        state = _quiet_state()
+        state.draw(Seat.EAST)
+        original = _capture(state)
+        transition = state._begin()
+        transition.current_seat = None
+
+        with self.assertRaises(RoundInvariantError):
+            state._commit(transition)
+
+        self.assertEqual(_capture(state), original)
+
+    def test_rejects_a_current_seat_outside_seat_holding_phases(self) -> None:
+        state = _quiet_state()
+        original = _capture(state)
+        transition = state._begin()
+        transition.phase = RoundPhase.FINISHED
+        transition.current_seat = Seat.EAST
 
         with self.assertRaises(RoundInvariantError):
             state._commit(transition)
