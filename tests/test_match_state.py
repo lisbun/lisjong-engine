@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import FrozenInstanceError, replace
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from lisjong_engine.dora import DoraIndicators
 from lisjong_engine.final_score import calculate_final_scores
@@ -15,6 +15,7 @@ from lisjong_engine.match_state import (
     _next_round_position,
 )
 from lisjong_engine.points import SeatPoints
+from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.round_allocation import create_round_random_provenance
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_result import (
@@ -24,6 +25,7 @@ from lisjong_engine.round_result import (
     WinningPlayerResult,
     WinResult,
 )
+from lisjong_engine.round_state import RoundState
 from lisjong_engine.rules import MatchFormat, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import calculate_round_settlement
@@ -31,6 +33,19 @@ from lisjong_engine.tile import STANDARD_TILES
 from lisjong_engine.win_context import WinMethod, WinningContext, WinOrigin
 from lisjong_engine.wind import Wind
 from lisjong_engine.winning_score import evaluate_winning_scores
+
+
+def _finish_round(round_state: RoundState, result) -> None:
+    """testのためだけに、既に開始済みのRoundStateを終局済みfactへ直接進める。
+
+    実際の対局進行（打牌・鳴き・立直・和了・流局判定）を再現するのは
+    MatchState境界のtestとして過度に複雑なため、Issue #24第5段階の
+    レビュー方針に従い、production APIへterminal専用のtest-only hookを
+    追加する代わりにprivate fieldを直接書き換える。RoundState自身の
+    終局contractは別途RoundState向けtestで検証済み。
+    """
+    round_state._phase = RoundPhase.FINISHED
+    round_state._result = result
 
 
 def _seat_wind(seat: Seat, dealer_seat: Seat) -> Wind:
@@ -992,6 +1007,269 @@ class NextRoundPositionTest(unittest.TestCase):
                 True,
                 riichi_sticks=-1,
             )
+
+
+class SettleActiveRoundTest(unittest.TestCase):
+    def _match_with_finished_round(self, result):
+        match = MatchState(seed=1)
+        round_state = match.start_round()
+        _finish_round(round_state, result)
+        return match, round_state
+
+    def test_dealer_noten_exhaustive_draw_flows_dealer_and_increments_honba(
+        self,
+    ) -> None:
+        match, round_state = self._match_with_finished_round(ExhaustiveDrawResult())
+        starting_scores = match.scores
+        provenance_before = match._active_round_random_provenance
+
+        completed = match.settle_active_round()
+
+        expected_settlement = calculate_round_settlement(
+            ExhaustiveDrawResult(),
+            dealer_seat=Seat.EAST,
+            honba=0,
+            riichi_sticks_before=0,
+            rules=match.rules,
+        )
+        self.assertEqual(completed.settlement, expected_settlement)
+        self.assertEqual(
+            completed.scores_after_settlement,
+            starting_scores.add(expected_settlement.point_deltas),
+        )
+        self.assertFalse(completed.dealer_continues)
+        self.assertEqual(
+            completed.next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=2,
+                dealer_seat=Seat.SOUTH,
+                honba=1,
+                riichi_sticks=0,
+            ),
+        )
+        self.assertIs(completed.random_provenance, provenance_before)
+        self.assertEqual(
+            completed.position_before,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=0,
+                riichi_sticks=0,
+            ),
+        )
+        self.assertIs(completed.result, round_state.result)
+
+        self.assertEqual(match.scores, completed.scores_after_settlement)
+        self.assertEqual(match.position, completed.next_position)
+        self.assertEqual(match.history, (completed,))
+        self.assertIs(match.phase, MatchPhase.AWAITING_ROUND)
+        self.assertIsNone(match.active_round)
+        self.assertIsNone(match._active_round_random_provenance)
+        self.assertIsNone(match.completed_match)
+        self.assertEqual(match._started_round_count, 1)
+
+    def test_dealer_tenpai_exhaustive_draw_keeps_same_hand_and_increments_honba(
+        self,
+    ) -> None:
+        match, _ = self._match_with_finished_round(
+            ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+        )
+
+        completed = match.settle_active_round()
+
+        self.assertTrue(completed.dealer_continues)
+        self.assertEqual(
+            completed.next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=1,
+                riichi_sticks=0,
+            ),
+        )
+        self.assertEqual(match.position, completed.next_position)
+
+    def test_abortive_draw_keeps_same_hand_and_increments_honba(self) -> None:
+        match, _ = self._match_with_finished_round(
+            AbortiveDrawResult(AbortiveDrawReason.FOUR_KANS)
+        )
+
+        completed = match.settle_active_round()
+
+        self.assertTrue(completed.dealer_continues)
+        self.assertEqual(
+            completed.next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=1,
+                riichi_sticks=0,
+            ),
+        )
+        self.assertEqual(
+            completed.scores_after_settlement,
+            match.scores,
+        )
+
+    def test_nondealer_win_flows_dealer_and_resets_honba(self) -> None:
+        result = _win_result(
+            (Seat.SOUTH,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.EAST,
+            source_seat=Seat.EAST,
+        )
+        match, _ = self._match_with_finished_round(result)
+        starting_scores = match.scores
+
+        completed = match.settle_active_round()
+
+        self.assertFalse(completed.dealer_continues)
+        self.assertEqual(
+            completed.next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=2,
+                dealer_seat=Seat.SOUTH,
+                honba=0,
+                riichi_sticks=0,
+            ),
+        )
+        self.assertEqual(
+            completed.scores_after_settlement,
+            starting_scores.add(completed.settlement.point_deltas),
+        )
+        self.assertNotEqual(match.scores, starting_scores)
+
+    def test_riichi_contribution_is_forwarded_and_reflected_in_settlement(
+        self,
+    ) -> None:
+        match, round_state = self._match_with_finished_round(ExhaustiveDrawResult())
+        rules = match.rules
+        contribution = RiichiContribution(Seat.SOUTH, rules.riichi_stick_points)
+
+        with patch.object(
+            RoundState,
+            "riichi_contributions",
+            new_callable=PropertyMock,
+            return_value=(contribution,),
+        ):
+            completed = match.settle_active_round()
+
+        self.assertEqual(completed.settlement.riichi_contributions, (contribution,))
+        self.assertEqual(
+            completed.scores_after_settlement[Seat.SOUTH],
+            25_000 - rules.riichi_stick_points,
+        )
+        self.assertEqual(
+            completed.settlement.riichi_sticks_after,
+            1,
+        )
+        self.assertEqual(completed.next_position.riichi_sticks, 1)
+        self.assertEqual(match.position.riichi_sticks, 1)
+
+    def test_second_round_uses_ordinal_two(self) -> None:
+        match = MatchState(seed=42)
+        first_round = match.start_round()
+        _finish_round(first_round, ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,)))
+        match.settle_active_round()
+
+        second_round = match.start_round()
+
+        self.assertEqual(match._started_round_count, 2)
+        self.assertEqual(match._active_round_random_provenance.round_ordinal, 2)
+        self.assertEqual(match._active_round_random_provenance.match_seed, 42)
+        self.assertIs(match.active_round, second_round)
+
+    def test_rejects_second_settle_after_success(self) -> None:
+        match, _ = self._match_with_finished_round(ExhaustiveDrawResult())
+        match.settle_active_round()
+
+        with self.assertRaises(RuntimeError):
+            match.settle_active_round()
+
+        self.assertEqual(len(match.history), 1)
+
+    def test_rejects_settle_of_unfinished_round(self) -> None:
+        match = MatchState(seed=1)
+        round_state = match.start_round()
+        scores_before = match.scores
+        position_before = match.position
+
+        with self.assertRaises(RuntimeError):
+            match.settle_active_round()
+
+        self.assertIs(match.phase, MatchPhase.ROUND_IN_PROGRESS)
+        self.assertIs(match.active_round, round_state)
+        self.assertEqual(match.scores, scores_before)
+        self.assertEqual(match.position, position_before)
+        self.assertEqual(match.history, ())
+
+    def test_rejects_settle_when_provenance_missing(self) -> None:
+        match, round_state = self._match_with_finished_round(ExhaustiveDrawResult())
+        match._active_round_random_provenance = None
+
+        with self.assertRaises(RuntimeError):
+            match.settle_active_round()
+
+        self.assertIs(match.active_round, round_state)
+        self.assertEqual(match.history, ())
+
+    def test_rejects_settle_when_context_is_inconsistent(self) -> None:
+        match, round_state = self._match_with_finished_round(ExhaustiveDrawResult())
+        round_state._dealer_seat = Seat.SOUTH
+
+        with self.assertRaises(ValueError):
+            match.settle_active_round()
+
+        self.assertIs(match.active_round, round_state)
+        self.assertIs(match.phase, MatchPhase.ROUND_IN_PROGRESS)
+        self.assertEqual(match.history, ())
+
+    def test_settlement_failure_leaves_match_state_untouched(self) -> None:
+        match, round_state = self._match_with_finished_round(ExhaustiveDrawResult())
+        provenance_before = match._active_round_random_provenance
+        scores_before = match.scores
+        position_before = match.position
+
+        with patch(
+            "lisjong_engine.match_state.calculate_round_settlement",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                match.settle_active_round()
+
+        self.assertIs(match.phase, MatchPhase.ROUND_IN_PROGRESS)
+        self.assertIs(match.active_round, round_state)
+        self.assertIs(match._active_round_random_provenance, provenance_before)
+        self.assertEqual(match.scores, scores_before)
+        self.assertEqual(match.position, position_before)
+        self.assertEqual(match.history, ())
+        self.assertEqual(match._started_round_count, 1)
+
+    def test_next_position_failure_leaves_match_state_untouched(self) -> None:
+        match, round_state = self._match_with_finished_round(ExhaustiveDrawResult())
+        provenance_before = match._active_round_random_provenance
+        scores_before = match.scores
+        position_before = match.position
+
+        with patch(
+            "lisjong_engine.match_state._next_round_position",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                match.settle_active_round()
+
+        self.assertIs(match.phase, MatchPhase.ROUND_IN_PROGRESS)
+        self.assertIs(match.active_round, round_state)
+        self.assertIs(match._active_round_random_provenance, provenance_before)
+        self.assertEqual(match.scores, scores_before)
+        self.assertEqual(match.position, position_before)
+        self.assertEqual(match.history, ())
+        self.assertEqual(match._started_round_count, 1)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from lisjong_engine.round_allocation import (
     create_round_random_provenance,
     create_round_wall,
 )
+from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_result import (
     AbortiveDrawResult,
     ExhaustiveDrawResult,
@@ -28,7 +29,11 @@ from lisjong_engine.round_result import (
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.rules import MatchFormat, RuleSet
 from lisjong_engine.seat import Seat
-from lisjong_engine.settlement import RiichiStickAward, RoundSettlement
+from lisjong_engine.settlement import (
+    RiichiStickAward,
+    RoundSettlement,
+    calculate_round_settlement,
+)
 from lisjong_engine.wind import Wind
 
 # F2は4人半荘のみを扱う。北場は対局位置として成立しない。
@@ -307,6 +312,102 @@ class MatchState:
         self._phase = MatchPhase.ROUND_IN_PROGRESS
 
         return candidate_round
+
+    def settle_active_round(self) -> CompletedRound:
+        """終了済みactive roundをF1でpureに精算し、non-terminal局として次局
+        待ちstateへatomicにcommitする。
+
+        `MatchPhase.ROUND_IN_PROGRESS`かつ、active roundが
+        `RoundPhase.FINISHED`で`result`を確定しているときだけ成功する。
+        精算計算そのものは一切再実装せず、`calculate_round_settlement()`
+        （F1）を唯一の正本として使う。dealer continuation・next position
+        （非terminal限定）もIssue #24第4段階のpure helperをそのまま使う。
+
+        すべてのcandidate計算が成功するまで`self`を一切mutationせず、
+        成功した場合だけ最後にまとめてcommitする。途中で例外になった
+        場合、終了済みのactive roundとそのprovenanceを含め、`self`は
+        呼び出し前と完全に同一のままとなる。match終了判定（bankruptcy、
+        南4/西4終局、TARGET_REACHED等）は本メソッドの責務ではなく、
+        後続段階で追加する。
+        """
+        if self._phase is not MatchPhase.ROUND_IN_PROGRESS:
+            raise RuntimeError(
+                "settle_active_round() requires MatchPhase.ROUND_IN_PROGRESS"
+            )
+        if self._active_round is None:
+            raise RuntimeError("settle_active_round() requires an active round")
+        if self._active_round_random_provenance is None:
+            raise RuntimeError(
+                "settle_active_round() requires the active round's random provenance"
+            )
+
+        round_state = self._active_round
+        provenance = self._active_round_random_provenance
+
+        if round_state.phase is not RoundPhase.FINISHED:
+            raise RuntimeError("the active round has not finished")
+        result = round_state.result
+        if result is None:
+            raise RuntimeError("a finished round must have a result")
+
+        if round_state.rules != self._rules:
+            raise ValueError("the active round's rules do not match MatchState.rules")
+        if round_state.dealer_seat is not self._position.dealer_seat:
+            raise ValueError(
+                "the active round's dealer_seat does not match the current position"
+            )
+        if round_state.prevailing_wind is not self._position.prevailing_wind:
+            raise ValueError(
+                "the active round's prevailing_wind does not match the current position"
+            )
+        if SeatPoints.from_mapping(round_state.round_start_points) != self._scores:
+            raise ValueError(
+                "the active round's round_start_points do not match MatchState.scores"
+            )
+        if provenance.match_seed != self._match_seed:
+            raise ValueError("the active round's provenance match_seed is inconsistent")
+        if provenance.round_ordinal != self._started_round_count:
+            raise ValueError(
+                "the active round's provenance round_ordinal is inconsistent"
+            )
+
+        settlement = calculate_round_settlement(
+            result,
+            dealer_seat=self._position.dealer_seat,
+            honba=self._position.honba,
+            riichi_sticks_before=self._position.riichi_sticks,
+            riichi_contributions=round_state.riichi_contributions,
+            rules=self._rules,
+        )
+
+        scores_after = self._scores.add(settlement.point_deltas)
+        dealer_continues = _dealer_continues(result, self._position.dealer_seat)
+        next_position = _next_round_position(
+            self._position,
+            result,
+            dealer_continues,
+            riichi_sticks=settlement.riichi_sticks_after,
+        )
+
+        completed_round = CompletedRound(
+            random_provenance=provenance,
+            position_before=self._position,
+            result=result,
+            settlement=settlement,
+            scores_after_settlement=scores_after,
+            dealer_continues=dealer_continues,
+            next_position=next_position,
+        )
+        history_after = self._history + (completed_round,)
+
+        self._scores = scores_after
+        self._position = next_position
+        self._history = history_after
+        self._active_round = None
+        self._active_round_random_provenance = None
+        self._phase = MatchPhase.AWAITING_ROUND
+
+        return completed_round
 
 
 def _resolve_starting_scores(
