@@ -1,8 +1,9 @@
 import unittest
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 
 from lisjong_engine.dora import DoraIndicators
 from lisjong_engine.points import SeatPoints
+from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.round_result import (
     WinningPlayerResult,
     WinResult,
@@ -10,6 +11,8 @@ from lisjong_engine.round_result import (
 from lisjong_engine.rules import RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import (
+    RiichiStickAward,
+    RoundSettlement,
     SettlementTransfer,
     TransferReason,
     aggregate_settlement_transfers,

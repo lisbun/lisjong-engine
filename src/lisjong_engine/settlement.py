@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from lisjong_engine.points import SeatPoints
+from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.round_result import WinningPlayerResult, WinResult
 from lisjong_engine.rules import RuleSet
 from lisjong_engine.seat import Seat
@@ -69,6 +70,91 @@ class SettlementTransfer:
             raise ValueError(
                 "winning transfers must identify their recipient as winner"
             )
+
+
+@dataclass(frozen=True)
+class RoundSettlement:
+    """1局終了時の点数精算を表すimmutableかつ監査可能な結果。
+
+    ``point_deltas`` はplayer間transfer、成立した立直供託、
+    riichi stick awardから導出できる値でなければならない。
+
+    ``riichi_sticks_after`` は精算後に卓上へ残る供託棒の本数。
+    供託棒の増減そのものの保存則は、精算前本数とRuleSetを入力に持つ
+    上位のcalculate_round_settlement()で検証する。
+    """
+
+    point_deltas: SeatPoints
+    transfers: tuple[SettlementTransfer, ...] = ()
+    riichi_contributions: tuple[RiichiContribution, ...] = ()
+    riichi_stick_awards: tuple[RiichiStickAward, ...] = ()
+    riichi_sticks_after: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.point_deltas, SeatPoints):
+            raise TypeError("point_deltas must be SeatPoints")
+
+        try:
+            transfers = tuple(self.transfers)
+        except TypeError:
+            raise TypeError(
+                "transfers must be an iterable of SettlementTransfer values"
+            ) from None
+        if any(not isinstance(item, SettlementTransfer) for item in transfers):
+            raise TypeError("transfers must contain only SettlementTransfer values")
+
+        try:
+            contributions = tuple(self.riichi_contributions)
+        except TypeError:
+            raise TypeError(
+                "riichi_contributions must be an iterable of RiichiContribution values"
+            ) from None
+        if any(not isinstance(item, RiichiContribution) for item in contributions):
+            raise TypeError(
+                "riichi_contributions must contain only RiichiContribution values"
+            )
+        contribution_seats = tuple(contribution.seat for contribution in contributions)
+        if len(set(contribution_seats)) != len(contribution_seats):
+            raise ValueError("riichi contribution seats must be unique within a round")
+
+        try:
+            awards = tuple(self.riichi_stick_awards)
+        except TypeError:
+            raise TypeError(
+                "riichi_stick_awards must be an iterable of RiichiStickAward values"
+            ) from None
+        if any(not isinstance(item, RiichiStickAward) for item in awards):
+            raise TypeError(
+                "riichi_stick_awards must contain only RiichiStickAward values"
+            )
+
+        if type(self.riichi_sticks_after) is not int:
+            raise TypeError("riichi_sticks_after must be an int")
+        if self.riichi_sticks_after < 0:
+            raise ValueError("riichi_sticks_after must be non-negative")
+
+        expected_deltas = _derive_round_point_deltas(
+            transfers,
+            contributions,
+            awards,
+        )
+        if self.point_deltas != expected_deltas:
+            raise ValueError(
+                "point_deltas must match transfers, "
+                "riichi contributions, and riichi stick awards"
+            )
+
+        object.__setattr__(self, "transfers", transfers)
+        object.__setattr__(
+            self,
+            "riichi_contributions",
+            contributions,
+        )
+        object.__setattr__(
+            self,
+            "riichi_stick_awards",
+            awards,
+        )
 
 
 def calculate_single_win_settlement_transfers(
@@ -141,6 +227,22 @@ def aggregate_settlement_transfers(
     for transfer in transfer_tuple:
         deltas[transfer.payer] -= transfer.amount
         deltas[transfer.recipient] += transfer.amount
+
+    return SeatPoints.from_mapping(deltas)
+
+
+def _derive_round_point_deltas(
+    transfers: tuple[SettlementTransfer, ...],
+    riichi_contributions: tuple[RiichiContribution, ...],
+    riichi_stick_awards: tuple[RiichiStickAward, ...],
+) -> SeatPoints:
+    deltas = aggregate_settlement_transfers(transfers).as_dict()
+
+    for contribution in riichi_contributions:
+        deltas[contribution.seat] -= contribution.points
+
+    for award in riichi_stick_awards:
+        deltas[award.recipient] += award.amount
 
     return SeatPoints.from_mapping(deltas)
 

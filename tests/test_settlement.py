@@ -1,9 +1,12 @@
 import unittest
 from dataclasses import FrozenInstanceError
 
+from lisjong_engine.points import SeatPoints
+from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import (
     RiichiStickAward,
+    RoundSettlement,
     SettlementTransfer,
     TransferReason,
 )
@@ -31,6 +34,151 @@ class RiichiStickAwardTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             RiichiStickAward(Seat.SOUTH, 0)
+
+
+class RoundSettlementTest(unittest.TestCase):
+    def test_derives_auditable_point_deltas(self) -> None:
+        transfers = (
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.SOUTH,
+                1_600,
+                TransferReason.RON,
+                Seat.SOUTH,
+            ),
+        )
+        contributions = (RiichiContribution(Seat.WEST, 1_000),)
+        awards = (RiichiStickAward(Seat.SOUTH, 2_000),)
+
+        result = RoundSettlement(
+            point_deltas=SeatPoints(
+                -1_600,
+                3_600,
+                -1_000,
+                0,
+            ),
+            transfers=transfers,
+            riichi_contributions=contributions,
+            riichi_stick_awards=awards,
+            riichi_sticks_after=0,
+        )
+
+        self.assertEqual(result.transfers, transfers)
+        self.assertEqual(
+            result.riichi_contributions,
+            contributions,
+        )
+        self.assertEqual(
+            result.riichi_stick_awards,
+            awards,
+        )
+        self.assertEqual(result.point_deltas.total, 1_000)
+        self.assertEqual(result.riichi_sticks_after, 0)
+
+    def test_defensively_copies_collections(self) -> None:
+        transfers = [
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.SOUTH,
+                1_600,
+                TransferReason.RON,
+                Seat.SOUTH,
+            )
+        ]
+        contributions = [RiichiContribution(Seat.WEST, 1_000)]
+        awards = [RiichiStickAward(Seat.SOUTH, 1_000)]
+
+        result = RoundSettlement(
+            point_deltas=SeatPoints(
+                -1_600,
+                2_600,
+                -1_000,
+                0,
+            ),
+            transfers=transfers,
+            riichi_contributions=contributions,
+            riichi_stick_awards=awards,
+            riichi_sticks_after=0,
+        )
+
+        transfers.clear()
+        contributions.clear()
+        awards.clear()
+
+        self.assertEqual(len(result.transfers), 1)
+        self.assertEqual(len(result.riichi_contributions), 1)
+        self.assertEqual(len(result.riichi_stick_awards), 1)
+
+    def test_is_immutable(self) -> None:
+        result = RoundSettlement(
+            point_deltas=SeatPoints(0, 0, 0, 0),
+        )
+
+        with self.assertRaises(FrozenInstanceError):
+            result.riichi_sticks_after = 1
+
+    def test_rejects_point_deltas_inconsistent_with_audit_facts(self) -> None:
+        transfer = SettlementTransfer(
+            Seat.EAST,
+            Seat.SOUTH,
+            1_600,
+            TransferReason.RON,
+            Seat.SOUTH,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "point_deltas",
+        ):
+            RoundSettlement(
+                point_deltas=SeatPoints(0, 0, 0, 0),
+                transfers=(transfer,),
+            )
+
+    def test_rejects_duplicate_riichi_contribution_seats(self) -> None:
+        contributions = (
+            RiichiContribution(Seat.EAST, 1_000),
+            RiichiContribution(Seat.EAST, 1_000),
+        )
+
+        with self.assertRaisesRegex(ValueError, "unique"):
+            RoundSettlement(
+                point_deltas=SeatPoints(-2_000, 0, 0, 0),
+                riichi_contributions=contributions,
+                riichi_sticks_after=2,
+            )
+
+    def test_rejects_invalid_collection_members(self) -> None:
+        with self.assertRaises(TypeError):
+            RoundSettlement(
+                point_deltas=SeatPoints(0, 0, 0, 0),
+                transfers=("transfer",),
+            )
+
+        with self.assertRaises(TypeError):
+            RoundSettlement(
+                point_deltas=SeatPoints(0, 0, 0, 0),
+                riichi_contributions=("contribution",),
+            )
+
+        with self.assertRaises(TypeError):
+            RoundSettlement(
+                point_deltas=SeatPoints(0, 0, 0, 0),
+                riichi_stick_awards=("award",),
+            )
+
+    def test_rejects_invalid_riichi_sticks_after(self) -> None:
+        with self.assertRaises(TypeError):
+            RoundSettlement(
+                point_deltas=SeatPoints(0, 0, 0, 0),
+                riichi_sticks_after=True,
+            )
+
+        with self.assertRaises(ValueError):
+            RoundSettlement(
+                point_deltas=SeatPoints(0, 0, 0, 0),
+                riichi_sticks_after=-1,
+            )
 
 
 class SettlementTransferTest(unittest.TestCase):
