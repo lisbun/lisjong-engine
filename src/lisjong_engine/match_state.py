@@ -258,13 +258,11 @@ class MatchState:
         self._history: tuple[CompletedRound, ...] = ()
         self._completed_match: CompletedMatch | None = None
         self._match_seed = seed
-        # 後続段階が`derive_round_seed(match_seed, started_round_count + 1)`
-        # としてnext round ordinalを導出するための内部state。
-        # global counterではなく、このinstanceだけが所有する。
+        # 次に開始する局の1-based ordinalを、成功裏に開始した局数 + 1として
+        # 決定するためのinstance-local state。成功したstart_round()だけが増やす。
         self._started_round_count = 0
-        # active roundのrandom provenance。`start_round()`が完全成功した
-        # ときだけ設定し、後続段階の`CompletedRound.random_provenance`へ
-        # そのまま引き継ぐ。
+        # active roundのrandom provenance。start_round()が完全成功したときだけ
+        # 設定し、settlement時のCompletedRound.random_provenanceへそのまま引き継ぐ。
         self._active_round_random_provenance: RoundRandomProvenance | None = None
 
     @property
