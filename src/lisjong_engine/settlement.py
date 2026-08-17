@@ -5,10 +5,16 @@ from enum import Enum
 from lisjong_engine.points import SeatPoints
 from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.round_result import WinningPlayerResult, WinResult
-from lisjong_engine.rules import RuleSet
+from lisjong_engine.rules import (
+    MultipleRonAwardPolicy,
+    RonResolutionPolicy,
+    RuleSet,
+)
 from lisjong_engine.seat import Seat
 from lisjong_engine.win_context import WinMethod
 from lisjong_engine.wind import Wind
+
+_SEAT_ORDER = tuple(Seat)
 
 
 class TransferReason(Enum):
@@ -157,18 +163,14 @@ class RoundSettlement:
         )
 
 
-def calculate_single_win_settlement_transfers(
+def calculate_win_settlement_transfers(
     result: WinResult,
     *,
     dealer_seat: Seat,
     honba: int = 0,
     rules: RuleSet | None = None,
 ) -> tuple[SettlementTransfer, ...]:
-    """パオを伴わないsingle-winner和了のplayer間transferを計算する。
-
-    本関数はRoundSettlement構築前のlower-level pure calculationであり、
-    riichi stickの授与は扱わない。
-    """
+    """通常（パオなし）の和了player間transferを計算する。"""
     if not isinstance(result, WinResult):
         raise TypeError("result must be a WinResult")
     if not isinstance(dealer_seat, Seat):
@@ -183,26 +185,57 @@ def calculate_single_win_settlement_transfers(
     elif not isinstance(rules, RuleSet):
         raise TypeError("rules must be a RuleSet")
 
-    if len(result.winners) != 1:
-        raise ValueError("single win settlement requires exactly one winner")
+    winner_count = len(result.winners)
+    if winner_count > 3:
+        raise ValueError("ron cannot have more than three winners")
 
-    winner = result.winners[0]
-    _validate_winner_settlement_context(
-        winner,
-        dealer_seat=dealer_seat,
-        rules=rules,
-    )
+    if winner_count > 1:
+        if result.method is not WinMethod.RON:
+            raise ValueError("multiple winners require ron")
+        if rules.ron_resolution_policy is not RonResolutionPolicy.MULTIPLE_RON:
+            raise ValueError("multiple ron result contradicts ron resolution policy")
+        if not rules.double_ron_enabled:
+            raise ValueError("multiple ron is disabled by the rules")
+        if winner_count == 3 and rules.triple_ron_abortive_draw:
+            raise ValueError("triple ron must be an abortive draw under these rules")
 
-    if result.method is WinMethod.RON:
-        return _single_ron_transfers(
-            result,
+    for winner in result.winners:
+        _validate_winner_settlement_context(
             winner,
+            dealer_seat=dealer_seat,
+            rules=rules,
+        )
+
+    if result.method is WinMethod.TSUMO:
+        return _single_tsumo_transfers(
+            result.winners[0],
+            dealer_seat=dealer_seat,
             honba=honba,
             rules=rules,
         )
 
-    return _single_tsumo_transfers(
-        winner,
+    return _ron_transfers(
+        result,
+        honba=honba,
+        rules=rules,
+    )
+
+
+def calculate_single_win_settlement_transfers(
+    result: WinResult,
+    *,
+    dealer_seat: Seat,
+    honba: int = 0,
+    rules: RuleSet | None = None,
+) -> tuple[SettlementTransfer, ...]:
+    """パオを伴わないsingle-winner和了のplayer間transferを計算する。"""
+    if not isinstance(result, WinResult):
+        raise TypeError("result must be a WinResult")
+    if len(result.winners) != 1:
+        raise ValueError("single win settlement requires exactly one winner")
+
+    return calculate_win_settlement_transfers(
+        result,
         dealer_seat=dealer_seat,
         honba=honba,
         rules=rules,
@@ -289,9 +322,8 @@ def _score_payments(
     return next(iter(payments))
 
 
-def _single_ron_transfers(
+def _ron_transfers(
     result: WinResult,
-    winner: WinningPlayerResult,
     *,
     honba: int,
     rules: RuleSet,
@@ -299,32 +331,68 @@ def _single_ron_transfers(
     source_seat = result.source_seat
     assert source_seat is not None
 
-    ron_payment, _, _ = _score_payments(winner)
-    assert ron_payment is not None
+    transfers = []
 
-    transfers = [
-        SettlementTransfer(
-            source_seat,
-            winner.seat,
-            ron_payment,
-            TransferReason.RON,
-            winner.seat,
-        )
-    ]
+    for winner in sorted(
+        result.winners,
+        key=lambda item: _SEAT_ORDER.index(item.seat),
+    ):
+        ron_payment, _, _ = _score_payments(winner)
+        assert ron_payment is not None
 
-    honba_points = honba * rules.ron_honba_points
-    if honba_points:
         transfers.append(
             SettlementTransfer(
                 source_seat,
                 winner.seat,
-                honba_points,
-                TransferReason.HONBA,
+                ron_payment,
+                TransferReason.RON,
                 winner.seat,
             )
         )
 
+    honba_points = honba * rules.ron_honba_points
+    if honba_points:
+        award_seat = _multiple_ron_honba_award_seat(
+            result,
+            rules,
+        )
+        transfers.append(
+            SettlementTransfer(
+                source_seat,
+                award_seat,
+                honba_points,
+                TransferReason.HONBA,
+                award_seat,
+            )
+        )
+
     return tuple(transfers)
+
+
+def _multiple_ron_honba_award_seat(
+    result: WinResult,
+    rules: RuleSet,
+) -> Seat:
+    if len(result.winners) == 1:
+        return result.winners[0].seat
+
+    if (
+        rules.multiple_ron_honba_policy
+        is not MultipleRonAwardPolicy.NEAREST_WINNER_TO_DISCARDER
+    ):
+        raise ValueError("unsupported multiple-ron honba policy")
+
+    source_seat = result.source_seat
+    assert source_seat is not None
+
+    winner_seats = {winner.seat for winner in result.winners}
+    source_index = _SEAT_ORDER.index(source_seat)
+
+    return next(
+        _SEAT_ORDER[(source_index + distance) % len(_SEAT_ORDER)]
+        for distance in range(1, len(_SEAT_ORDER))
+        if _SEAT_ORDER[(source_index + distance) % len(_SEAT_ORDER)] in winner_seats
+    )
 
 
 def _single_tsumo_transfers(

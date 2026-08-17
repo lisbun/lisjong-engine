@@ -7,13 +7,14 @@ from lisjong_engine.round_result import (
     WinningPlayerResult,
     WinResult,
 )
-from lisjong_engine.rules import RuleSet
+from lisjong_engine.rules import RonResolutionPolicy, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import (
     SettlementTransfer,
     TransferReason,
     aggregate_settlement_transfers,
     calculate_single_win_settlement_transfers,
+    calculate_win_settlement_transfers,
 )
 from lisjong_engine.tile import STANDARD_TILES
 from lisjong_engine.win_context import (
@@ -29,6 +30,33 @@ def _seat_wind(seat: Seat, dealer_seat: Seat) -> Wind:
     seats = tuple(Seat)
     distance = (seats.index(seat) - seats.index(dealer_seat)) % len(seats)
     return tuple(Wind)[distance]
+
+
+def _multiple_ron_result(
+    winner_seats: tuple[Seat, ...],
+    *,
+    dealer_seat: Seat = Seat.EAST,
+    source_seat: Seat = Seat.EAST,
+    rules: RuleSet | None = None,
+) -> WinResult:
+    winners = tuple(
+        _winning_player(
+            seat,
+            method=WinMethod.RON,
+            dealer_seat=dealer_seat,
+            rules=rules,
+        )
+        for seat in winner_seats
+    )
+
+    return WinResult(
+        method=WinMethod.RON,
+        origin=WinOrigin.DISCARD,
+        winning_tile=winners[0].context.winning_tile,
+        winners=winners,
+        dora_indicators=DoraIndicators(),
+        source_seat=source_seat,
+    )
 
 
 def _winning_player(
@@ -91,6 +119,144 @@ def _win_result(
         dora_indicators=DoraIndicators(),
         source_seat=source_seat,
     )
+
+
+class MultipleRonSettlementTest(unittest.TestCase):
+    def test_double_ron_stacks_scores_and_awards_honba_to_nearest_winner(
+        self,
+    ) -> None:
+        result = _multiple_ron_result(
+            (Seat.WEST, Seat.SOUTH),
+        )
+
+        transfers = calculate_win_settlement_transfers(
+            result,
+            dealer_seat=Seat.EAST,
+            honba=2,
+        )
+
+        self.assertEqual(
+            transfers,
+            (
+                SettlementTransfer(
+                    Seat.EAST,
+                    Seat.SOUTH,
+                    1_600,
+                    TransferReason.RON,
+                    Seat.SOUTH,
+                ),
+                SettlementTransfer(
+                    Seat.EAST,
+                    Seat.WEST,
+                    1_600,
+                    TransferReason.RON,
+                    Seat.WEST,
+                ),
+                SettlementTransfer(
+                    Seat.EAST,
+                    Seat.SOUTH,
+                    600,
+                    TransferReason.HONBA,
+                    Seat.SOUTH,
+                ),
+            ),
+        )
+        self.assertEqual(
+            aggregate_settlement_transfers(transfers),
+            SeatPoints(-3_800, 2_200, 1_600, 0),
+        )
+
+    def test_winner_tuple_order_does_not_change_settlement(self) -> None:
+        first = _multiple_ron_result(
+            (Seat.SOUTH, Seat.WEST),
+        )
+        reversed_result = _multiple_ron_result(
+            (Seat.WEST, Seat.SOUTH),
+        )
+
+        self.assertEqual(
+            calculate_win_settlement_transfers(
+                first,
+                dealer_seat=Seat.EAST,
+                honba=2,
+            ),
+            calculate_win_settlement_transfers(
+                reversed_result,
+                dealer_seat=Seat.EAST,
+                honba=2,
+            ),
+        )
+
+    def test_triple_ron_stacks_all_winners_when_not_abortive(self) -> None:
+        rules = replace(
+            RuleSet.default(),
+            triple_ron_abortive_draw=False,
+        )
+        result = _multiple_ron_result(
+            (Seat.NORTH, Seat.SOUTH, Seat.WEST),
+            rules=rules,
+        )
+
+        transfers = calculate_win_settlement_transfers(
+            result,
+            dealer_seat=Seat.EAST,
+            rules=rules,
+        )
+
+        self.assertEqual(
+            aggregate_settlement_transfers(transfers),
+            SeatPoints(-4_800, 1_600, 1_600, 1_600),
+        )
+
+    def test_rejects_triple_ron_when_rules_require_abortive_draw(self) -> None:
+        result = _multiple_ron_result(
+            (Seat.SOUTH, Seat.WEST, Seat.NORTH),
+        )
+
+        with self.assertRaisesRegex(ValueError, "abortive draw"):
+            calculate_win_settlement_transfers(
+                result,
+                dealer_seat=Seat.EAST,
+            )
+
+    def test_rejects_multiple_ron_when_disabled(self) -> None:
+        rules = replace(
+            RuleSet.default(),
+            double_ron_enabled=False,
+            triple_ron_abortive_draw=False,
+        )
+        result = _multiple_ron_result(
+            (Seat.SOUTH, Seat.WEST),
+            rules=rules,
+        )
+
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            calculate_win_settlement_transfers(
+                result,
+                dealer_seat=Seat.EAST,
+                rules=rules,
+            )
+
+    def test_rejects_multiple_winners_under_head_bump(self) -> None:
+        rules = replace(
+            RuleSet.default(),
+            ron_resolution_policy=RonResolutionPolicy.HEAD_BUMP,
+            triple_ron_abortive_draw=False,
+        )
+        result = _multiple_ron_result(
+            (Seat.SOUTH, Seat.WEST),
+            rules=rules,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ron resolution policy",
+        ):
+            calculate_win_settlement_transfers(
+                result,
+                dealer_seat=Seat.EAST,
+                rules=rules,
+            )
 
 
 class SingleWinSettlementTest(unittest.TestCase):
