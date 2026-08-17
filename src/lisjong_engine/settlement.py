@@ -9,6 +9,7 @@ from lisjong_engine.round_result import (
     AbortiveDrawReason,
     AbortiveDrawResult,
     ExhaustiveDrawResult,
+    RoundResult,
     WinningPlayerResult,
     WinResult,
 )
@@ -26,6 +27,95 @@ from lisjong_engine.wind import Wind
 from lisjong_engine.yaku import Yaku
 
 _SEAT_ORDER = tuple(Seat)
+
+
+def _normalize_riichi_contributions(
+    contributions: Iterable[RiichiContribution],
+    rules: RuleSet,
+) -> tuple[RiichiContribution, ...]:
+    try:
+        normalized = tuple(contributions)
+    except TypeError:
+        raise TypeError(
+            "riichi_contributions must be an iterable of RiichiContribution values"
+        ) from None
+
+    if any(
+        not isinstance(contribution, RiichiContribution) for contribution in normalized
+    ):
+        raise TypeError(
+            "riichi_contributions must contain only RiichiContribution values"
+        )
+
+    seats = tuple(contribution.seat for contribution in normalized)
+    if len(set(seats)) != len(seats):
+        raise ValueError("riichi contribution seats must be unique within a round")
+
+    if any(
+        contribution.points != rules.riichi_stick_points for contribution in normalized
+    ):
+        raise ValueError(
+            "riichi contribution points must match rules.riichi_stick_points"
+        )
+
+    return tuple(
+        sorted(
+            normalized,
+            key=lambda item: _SEAT_ORDER.index(item.seat),
+        )
+    )
+
+
+def _round_riichi_stick_awards(
+    result: WinResult,
+    *,
+    riichi_sticks: int,
+    rules: RuleSet,
+) -> tuple[RiichiStickAward, ...]:
+    if riichi_sticks == 0:
+        return ()
+
+    if len(result.winners) == 1:
+        recipient = result.winners[0].seat
+    else:
+        recipient = _multiple_ron_riichi_stick_award_seat(
+            result,
+            rules,
+        )
+
+    return (
+        RiichiStickAward(
+            recipient,
+            riichi_sticks * rules.riichi_stick_points,
+        ),
+    )
+
+
+def _multiple_ron_riichi_stick_award_seat(
+    result: WinResult,
+    rules: RuleSet,
+) -> Seat:
+    if len(result.winners) == 1:
+        return result.winners[0].seat
+
+    if (
+        rules.multiple_ron_riichi_stick_policy
+        is not MultipleRonAwardPolicy.NEAREST_WINNER_TO_DISCARDER
+    ):
+        raise ValueError("unsupported multiple-ron riichi stick policy")
+
+    source_seat = result.source_seat
+    assert source_seat is not None
+
+    winner_seats = frozenset(winner.seat for winner in result.winners)
+    ordered_winners = _ordered_seats_after(
+        source_seat,
+        winner_seats,
+    )
+    if not ordered_winners:
+        raise ValueError("multiple ron must have a riichi stick award recipient")
+
+    return ordered_winners[0]
 
 
 def _noten_penalty_transfers(
@@ -453,6 +543,98 @@ def calculate_abortive_draw_settlement_transfers(
         raise ValueError("abortive draw reason is disabled by the rules")
 
     return ()
+
+
+def calculate_round_settlement(
+    result: RoundResult,
+    *,
+    dealer_seat: Seat,
+    honba: int = 0,
+    riichi_sticks_before: int = 0,
+    riichi_contributions: Iterable[RiichiContribution] = (),
+    rules: RuleSet | None = None,
+) -> RoundSettlement:
+    """終了した1局のfactから完全な局精算をpureに計算する。"""
+    if not isinstance(
+        result,
+        (WinResult, ExhaustiveDrawResult, AbortiveDrawResult),
+    ):
+        raise TypeError("result must be a RoundResult")
+    if not isinstance(dealer_seat, Seat):
+        raise TypeError("dealer_seat must be a Seat")
+    if type(honba) is not int:
+        raise TypeError("honba must be an int")
+    if honba < 0:
+        raise ValueError("honba must be non-negative")
+    if type(riichi_sticks_before) is not int:
+        raise TypeError("riichi_sticks_before must be an int")
+    if riichi_sticks_before < 0:
+        raise ValueError("riichi_sticks_before must be non-negative")
+
+    if rules is None:
+        rules = RuleSet.default()
+    elif not isinstance(rules, RuleSet):
+        raise TypeError("rules must be a RuleSet")
+
+    contributions = _normalize_riichi_contributions(
+        riichi_contributions,
+        rules,
+    )
+    available_riichi_sticks = riichi_sticks_before + len(contributions)
+
+    if isinstance(result, WinResult):
+        transfers = calculate_win_settlement_transfers(
+            result,
+            dealer_seat=dealer_seat,
+            honba=honba,
+            rules=rules,
+        )
+        awards = _round_riichi_stick_awards(
+            result,
+            riichi_sticks=available_riichi_sticks,
+            rules=rules,
+        )
+        riichi_sticks_after = 0
+    elif isinstance(result, ExhaustiveDrawResult):
+        transfers = calculate_exhaustive_draw_settlement_transfers(
+            result,
+            dealer_seat=dealer_seat,
+            rules=rules,
+        )
+        awards = ()
+        riichi_sticks_after = available_riichi_sticks
+    else:
+        transfers = calculate_abortive_draw_settlement_transfers(
+            result,
+            rules=rules,
+        )
+        awards = ()
+        riichi_sticks_after = available_riichi_sticks
+
+    point_deltas = _derive_round_point_deltas(
+        transfers,
+        contributions,
+        awards,
+    )
+
+    settlement = RoundSettlement(
+        point_deltas=point_deltas,
+        transfers=transfers,
+        riichi_contributions=contributions,
+        riichi_stick_awards=awards,
+        riichi_sticks_after=riichi_sticks_after,
+    )
+
+    pot_value_delta = (
+        riichi_sticks_after - riichi_sticks_before
+    ) * rules.riichi_stick_points
+
+    if settlement.point_deltas.total + pot_value_delta != 0:
+        raise ValueError(
+            "round settlement must preserve player points plus riichi pot value"
+        )
+
+    return settlement
 
 
 def aggregate_settlement_transfers(

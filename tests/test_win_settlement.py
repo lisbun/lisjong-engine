@@ -3,6 +3,7 @@ from dataclasses import replace
 
 from lisjong_engine.dora import DoraIndicators
 from lisjong_engine.points import SeatPoints
+from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.round_result import (
     WinningPlayerResult,
     WinResult,
@@ -10,9 +11,11 @@ from lisjong_engine.round_result import (
 from lisjong_engine.rules import RonResolutionPolicy, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import (
+    RiichiStickAward,
     SettlementTransfer,
     TransferReason,
     aggregate_settlement_transfers,
+    calculate_round_settlement,
     calculate_single_win_settlement_transfers,
     calculate_win_settlement_transfers,
 )
@@ -452,6 +455,165 @@ class SingleWinSettlementTest(unittest.TestCase):
                         *arguments,
                         **keywords,
                     )
+
+
+class RoundSettlementWinIntegrationTest(unittest.TestCase):
+    def test_win_awards_existing_and_current_riichi_sticks(
+        self,
+    ) -> None:
+        result = _win_result(
+            Seat.SOUTH,
+            method=WinMethod.RON,
+            source_seat=Seat.EAST,
+        )
+
+        settlement = calculate_round_settlement(
+            result,
+            dealer_seat=Seat.EAST,
+            riichi_sticks_before=2,
+            riichi_contributions=(RiichiContribution(Seat.WEST, 1_000),),
+        )
+
+        self.assertEqual(
+            settlement.riichi_stick_awards,
+            (
+                RiichiStickAward(
+                    Seat.SOUTH,
+                    3_000,
+                ),
+            ),
+        )
+        self.assertEqual(
+            settlement.point_deltas,
+            SeatPoints(
+                -1_600,
+                4_600,
+                -1_000,
+                0,
+            ),
+        )
+        self.assertEqual(settlement.riichi_sticks_after, 0)
+
+        self.assertEqual(
+            settlement.point_deltas.total
+            + (settlement.riichi_sticks_after - 2) * 1_000,
+            0,
+        )
+
+    def test_double_ron_riichi_award_is_nearest_and_order_independent(
+        self,
+    ) -> None:
+        first = _multiple_ron_result(
+            (Seat.WEST, Seat.SOUTH),
+            source_seat=Seat.EAST,
+        )
+        reversed_result = _multiple_ron_result(
+            (Seat.SOUTH, Seat.WEST),
+            source_seat=Seat.EAST,
+        )
+
+        first_settlement = calculate_round_settlement(
+            first,
+            dealer_seat=Seat.EAST,
+            riichi_sticks_before=2,
+        )
+        reversed_settlement = calculate_round_settlement(
+            reversed_result,
+            dealer_seat=Seat.EAST,
+            riichi_sticks_before=2,
+        )
+
+        self.assertEqual(
+            first_settlement,
+            reversed_settlement,
+        )
+        self.assertEqual(
+            first_settlement.riichi_stick_awards,
+            (
+                RiichiStickAward(
+                    Seat.SOUTH,
+                    2_000,
+                ),
+            ),
+        )
+
+    def test_custom_riichi_stick_points_are_not_hardcoded(
+        self,
+    ) -> None:
+        rules = replace(
+            RuleSet.default(),
+            riichi_stick_points=1_500,
+        )
+        result = _win_result(
+            Seat.SOUTH,
+            method=WinMethod.RON,
+            source_seat=Seat.EAST,
+            rules=rules,
+        )
+
+        settlement = calculate_round_settlement(
+            result,
+            dealer_seat=Seat.EAST,
+            riichi_sticks_before=1,
+            riichi_contributions=(RiichiContribution(Seat.WEST, 1_500),),
+            rules=rules,
+        )
+
+        self.assertEqual(
+            settlement.riichi_stick_awards,
+            (
+                RiichiStickAward(
+                    Seat.SOUTH,
+                    3_000,
+                ),
+            ),
+        )
+        self.assertEqual(settlement.riichi_sticks_after, 0)
+
+    def test_rejects_contribution_points_that_disagree_with_rules(
+        self,
+    ) -> None:
+        result = _win_result(
+            Seat.SOUTH,
+            method=WinMethod.RON,
+            source_seat=Seat.EAST,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "riichi contribution points",
+        ):
+            calculate_round_settlement(
+                result,
+                dealer_seat=Seat.EAST,
+                riichi_contributions=(
+                    RiichiContribution(
+                        Seat.WEST,
+                        500,
+                    ),
+                ),
+            )
+
+    def test_rejects_invalid_riichi_sticks_before(self) -> None:
+        result = _win_result(
+            Seat.SOUTH,
+            method=WinMethod.RON,
+            source_seat=Seat.EAST,
+        )
+
+        with self.assertRaises(TypeError):
+            calculate_round_settlement(
+                result,
+                dealer_seat=Seat.EAST,
+                riichi_sticks_before=True,
+            )
+
+        with self.assertRaises(ValueError):
+            calculate_round_settlement(
+                result,
+                dealer_seat=Seat.EAST,
+                riichi_sticks_before=-1,
+            )
 
 
 if __name__ == "__main__":

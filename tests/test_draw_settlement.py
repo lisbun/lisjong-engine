@@ -2,6 +2,7 @@ import unittest
 from dataclasses import replace
 
 from lisjong_engine.points import SeatPoints
+from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.round_result import (
     AbortiveDrawReason,
     AbortiveDrawResult,
@@ -15,6 +16,7 @@ from lisjong_engine.settlement import (
     aggregate_settlement_transfers,
     calculate_abortive_draw_settlement_transfers,
     calculate_exhaustive_draw_settlement_transfers,
+    calculate_round_settlement,
 )
 
 
@@ -195,6 +197,61 @@ class ExhaustiveDrawSettlementTest(unittest.TestCase):
                 rules="rules",
             )
 
+    def test_exhaustive_draw_carries_existing_and_current_riichi_sticks(
+        self,
+    ) -> None:
+        result = ExhaustiveDrawResult()
+
+        settlement = calculate_round_settlement(
+            result,
+            dealer_seat=Seat.EAST,
+            riichi_sticks_before=2,
+            riichi_contributions=(
+                RiichiContribution(Seat.WEST, 1_000),
+                RiichiContribution(Seat.EAST, 1_000),
+            ),
+        )
+
+        self.assertEqual(
+            settlement.riichi_contributions,
+            (
+                RiichiContribution(Seat.EAST, 1_000),
+                RiichiContribution(Seat.WEST, 1_000),
+            ),
+        )
+        self.assertEqual(
+            settlement.point_deltas,
+            SeatPoints(-1_000, 0, -1_000, 0),
+        )
+        self.assertEqual(settlement.riichi_stick_awards, ())
+        self.assertEqual(settlement.riichi_sticks_after, 4)
+
+        self.assertEqual(
+            settlement.point_deltas.total
+            + (settlement.riichi_sticks_after - 2) * 1_000,
+            0,
+        )
+
+    def test_nagashi_mangan_does_not_consume_riichi_pot(
+        self,
+    ) -> None:
+        result = ExhaustiveDrawResult(
+            nagashi_mangan_seats=(Seat.SOUTH,),
+        )
+
+        settlement = calculate_round_settlement(
+            result,
+            dealer_seat=Seat.EAST,
+            riichi_sticks_before=2,
+        )
+
+        self.assertEqual(
+            aggregate_settlement_transfers(settlement.transfers),
+            SeatPoints(-4_000, 8_000, -2_000, -2_000),
+        )
+        self.assertEqual(settlement.riichi_stick_awards, ())
+        self.assertEqual(settlement.riichi_sticks_after, 2)
+
 
 class AbortiveDrawSettlementTest(unittest.TestCase):
     def test_enabled_abortive_draws_have_no_normal_transfer(self) -> None:
@@ -252,6 +309,32 @@ class AbortiveDrawSettlementTest(unittest.TestCase):
                 AbortiveDrawResult(AbortiveDrawReason.NINE_TERMINALS),
                 rules="rules",
             )
+
+    def test_abortive_draw_carries_established_riichi_contributions(
+        self,
+    ) -> None:
+        result = AbortiveDrawResult(AbortiveDrawReason.FOUR_RIICHI)
+        contributions = tuple(RiichiContribution(seat, 1_000) for seat in Seat)
+
+        settlement = calculate_round_settlement(
+            result,
+            dealer_seat=Seat.EAST,
+            riichi_sticks_before=1,
+            riichi_contributions=contributions,
+        )
+
+        self.assertEqual(
+            settlement.point_deltas,
+            SeatPoints(-1_000, -1_000, -1_000, -1_000),
+        )
+        self.assertEqual(settlement.riichi_stick_awards, ())
+        self.assertEqual(settlement.riichi_sticks_after, 5)
+
+        self.assertEqual(
+            settlement.point_deltas.total
+            + (settlement.riichi_sticks_after - 1) * 1_000,
+            0,
+        )
 
 
 if __name__ == "__main__":
