@@ -415,8 +415,31 @@ seed: int -> RandomSource -> shuffled Wall
 ```
 
 `RandomSource` はseedから決定的に生成されるengine-ownedな乱数sourceであり、
-`Wall`自身はseed管理責務を持たない。半荘seedと局seedの配分規則はまだ固定せず、
-Match層で確定する。
+`Wall`自身はseed管理責務を持たない。
+
+match seedから各局のround seedを導出する規則は、`round_allocation.py`
+（Issue #24第1段階）で確定している。
+
+```text
+match seed + 1-based round ordinal
+    -> SHA-256 domain-separated derivation
+    -> round seed
+    -> RandomSource(round_seed)
+    -> create_shuffled_wall(...)
+    -> Wall
+```
+
+`derive_round_seed(match_seed, round_ordinal)` は、Pythonの
+`hash()`（process間で不安定）へ依存せず、stdlibの`hashlib.sha256`だけを
+使ったpureな導出である。同じ`match_seed` + 同じ`round_ordinal`からは常に
+同じround seedを得る。連荘で場・局・本場が同じ`RoundPosition`が続いても、
+ordinalが増えれば別のround seed・別のWallになる。
+
+`round_ordinal`は「何局目として実際に開始されたか」を表すfactであり、その
+保持・incrementはMatchState（F2）の責務である。本moduleはmutableな
+allocation stateを持たず、次のordinalを自動的に決めるglobal counter等も
+持たない。`RoundRandomProvenance`は`match_seed` / `round_ordinal` /
+`round_seed`をimmutableに保持し、replay / artifactでの監査に使う。
 
 ## python-studyからの移行
 
