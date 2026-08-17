@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
+from lisjong_engine.meld import Ankan, Daiminkan, Kakan, Pon
 from lisjong_engine.points import SeatPoints
 from lisjong_engine.riichi_event import RiichiContribution
 from lisjong_engine.round_result import (
@@ -13,13 +14,16 @@ from lisjong_engine.round_result import (
 )
 from lisjong_engine.rules import (
     MultipleRonAwardPolicy,
+    PaoCompoundYakumanPolicy,
     RonResolutionPolicy,
     RuleSet,
 )
 from lisjong_engine.score import calculate_score
 from lisjong_engine.seat import Seat
+from lisjong_engine.tile import TileCategory, TileType
 from lisjong_engine.win_context import WinMethod
 from lisjong_engine.wind import Wind
+from lisjong_engine.yaku import Yaku
 
 _SEAT_ORDER = tuple(Seat)
 
@@ -315,7 +319,7 @@ def calculate_win_settlement_transfers(
     honba: int = 0,
     rules: RuleSet | None = None,
 ) -> tuple[SettlementTransfer, ...]:
-    """通常（パオなし）の和了player間transferを計算する。"""
+    """和了のplayer間transferをパオを含めて計算する。"""
     if not isinstance(result, WinResult):
         raise TypeError("result must be a WinResult")
     if not isinstance(dealer_seat, Seat):
@@ -361,6 +365,7 @@ def calculate_win_settlement_transfers(
 
     return _ron_transfers(
         result,
+        dealer_seat=dealer_seat,
         honba=honba,
         rules=rules,
     )
@@ -373,7 +378,7 @@ def calculate_single_win_settlement_transfers(
     honba: int = 0,
     rules: RuleSet | None = None,
 ) -> tuple[SettlementTransfer, ...]:
-    """パオを伴わないsingle-winner和了のplayer間transferを計算する。"""
+    """single-winner和了のplayer間transferを計算する。"""
     if not isinstance(result, WinResult):
         raise TypeError("result must be a WinResult")
     if len(result.winners) != 1:
@@ -530,9 +535,276 @@ def _score_payments(
     return next(iter(payments))
 
 
+@dataclass(frozen=True)
+class _PaoResponsibility:
+    seat: Seat
+    yaku: Yaku
+    responsible_units: int
+    total_units: int
+
+    @property
+    def other_units(self) -> int:
+        return self.total_units - self.responsible_units
+
+
+def _winner_points(winner: WinningPlayerResult) -> int:
+    points = {
+        candidate.winner_points
+        for candidate in winner.score_selection.max_score_candidates
+    }
+    if len(points) != 1:
+        raise ValueError("maximum score candidates must have identical winner points")
+    return next(iter(points))
+
+
+def _meld_tile_type(
+    meld: Pon | Daiminkan | Kakan | Ankan,
+) -> TileType:
+    if isinstance(meld, Ankan):
+        return meld.tiles[0].tile_type
+    return meld.called_tile.tile_type
+
+
+def _pao_trigger_seat(
+    target_yaku: Yaku,
+    winner: WinningPlayerResult,
+) -> Seat | None:
+    context = winner.context
+    declared_melds = context.declared_melds
+
+    if target_yaku is Yaku.SUUKANTSU:
+        kan_melds = tuple(
+            meld
+            for meld in declared_melds
+            if isinstance(meld, (Ankan, Daiminkan, Kakan))
+        )
+        if len(kan_melds) != 4:
+            return None
+        return context.suukantsu_pao_seat
+
+    if target_yaku is Yaku.DAISANGEN:
+        target_ranks = frozenset({5, 6, 7})
+        required_meld_count = 3
+    elif target_yaku is Yaku.DAISUUSHII:
+        target_ranks = frozenset({1, 2, 3, 4})
+        required_meld_count = 4
+    else:
+        raise ValueError("unsupported pao yaku")
+
+    completed_groups = tuple(
+        meld
+        for meld in declared_melds
+        if isinstance(meld, (Pon, Daiminkan, Kakan, Ankan))
+        and _meld_tile_type(meld).category is TileCategory.HONOR
+        and _meld_tile_type(meld).rank in target_ranks
+    )
+
+    if len(completed_groups) != required_meld_count:
+        return None
+
+    last_group = completed_groups[-1]
+    if isinstance(last_group, Ankan):
+        return None
+
+    return last_group.source_seat
+
+
+def _pao_responsibility(
+    winner: WinningPlayerResult,
+    rules: RuleSet,
+) -> _PaoResponsibility | None:
+    if not rules.pao_enabled:
+        return None
+
+    facts: set[tuple[Yaku | None, Seat | None, int, int]] = set()
+
+    for candidate in winner.score_selection.max_score_candidates:
+        evaluation = candidate.hand_value.yaku_evaluation
+        pao_matches = tuple(
+            match for match in evaluation.matches if match.yaku in rules.pao_yaku
+        )
+
+        target_yakus = frozenset(match.yaku for match in pao_matches)
+
+        if len(target_yakus) > 1:
+            raise ValueError("a winner cannot have multiple pao responsibilities")
+
+        if not target_yakus:
+            facts.add((None, None, 0, 0))
+            continue
+
+        target_yaku = next(iter(target_yakus))
+        responsible_units = sum(
+            match.yakuman_units for match in pao_matches if match.yaku is target_yaku
+        )
+        total_units = evaluation.yakuman_units
+        responsible_seat = _pao_trigger_seat(
+            target_yaku,
+            winner,
+        )
+
+        facts.add(
+            (
+                target_yaku,
+                responsible_seat,
+                responsible_units,
+                total_units,
+            )
+        )
+
+    if len(facts) != 1:
+        raise ValueError(
+            "maximum score candidates must have identical "
+            "pao target, responsibility, and yakuman split"
+        )
+
+    (
+        target_yaku,
+        responsible_seat,
+        responsible_units,
+        total_units,
+    ) = next(iter(facts))
+
+    if target_yaku is None or responsible_seat is None:
+        return None
+
+    if responsible_seat is winner.seat:
+        raise ValueError("a winner cannot be their own pao payer")
+    if responsible_units <= 0:
+        raise ValueError("pao responsibility must contain yakuman units")
+    if total_units < responsible_units:
+        raise ValueError("pao yakuman split is inconsistent")
+
+    other_units = total_units - responsible_units
+    if (
+        rules.pao_compound_yakuman_policy
+        is PaoCompoundYakumanPolicy.RESPONSIBLE_YAKUMAN_ONLY
+        and other_units
+        and not rules.multiple_yakuman_enabled
+    ):
+        raise ValueError(
+            "cannot split compound pao yakuman when multiple yakuman is disabled"
+        )
+
+    return _PaoResponsibility(
+        responsible_seat,
+        target_yaku,
+        responsible_units,
+        total_units,
+    )
+
+
+def _pao_ron_component_transfers(
+    *,
+    source_seat: Seat,
+    pao_seat: Seat,
+    winner_seat: Seat,
+    amount: int,
+) -> tuple[SettlementTransfer, ...]:
+    if pao_seat is source_seat:
+        return (
+            SettlementTransfer(
+                source_seat,
+                winner_seat,
+                amount,
+                TransferReason.PAO_RON,
+                winner_seat,
+            ),
+        )
+
+    if amount % 2:
+        raise ValueError("pao ron payment must be divisible by two")
+
+    half = amount // 2
+    return (
+        SettlementTransfer(
+            source_seat,
+            winner_seat,
+            half,
+            TransferReason.RON,
+            winner_seat,
+        ),
+        SettlementTransfer(
+            pao_seat,
+            winner_seat,
+            half,
+            TransferReason.PAO_RON,
+            winner_seat,
+        ),
+    )
+
+
+def _pao_ron_base_transfers(
+    winner: WinningPlayerResult,
+    *,
+    source_seat: Seat,
+    dealer_seat: Seat,
+    responsibility: _PaoResponsibility,
+    rules: RuleSet,
+) -> tuple[SettlementTransfer, ...]:
+    ron_payment, _, _ = _score_payments(winner)
+    assert ron_payment is not None
+
+    if (
+        rules.pao_compound_yakuman_policy is PaoCompoundYakumanPolicy.FULL_HAND
+        or responsibility.other_units == 0
+    ):
+        return _pao_ron_component_transfers(
+            source_seat=source_seat,
+            pao_seat=responsibility.seat,
+            winner_seat=winner.seat,
+            amount=ron_payment,
+        )
+
+    responsible_score = calculate_score(
+        han=0,
+        fu=None,
+        method=WinMethod.RON,
+        is_dealer=winner.seat is dealer_seat,
+        yakuman_units=responsibility.responsible_units,
+        rules=rules,
+    )
+    other_score = calculate_score(
+        han=0,
+        fu=None,
+        method=WinMethod.RON,
+        is_dealer=winner.seat is dealer_seat,
+        yakuman_units=responsibility.other_units,
+        rules=rules,
+    )
+
+    responsible_payment = responsible_score.ron_payment
+    other_payment = other_score.ron_payment
+    assert responsible_payment is not None
+    assert other_payment is not None
+
+    if responsible_payment + other_payment != ron_payment:
+        raise ValueError("split pao ron payments must match evaluated score")
+
+    transfers = list(
+        _pao_ron_component_transfers(
+            source_seat=source_seat,
+            pao_seat=responsibility.seat,
+            winner_seat=winner.seat,
+            amount=responsible_payment,
+        )
+    )
+    transfers.append(
+        SettlementTransfer(
+            source_seat,
+            winner.seat,
+            other_payment,
+            TransferReason.RON,
+            winner.seat,
+        )
+    )
+    return tuple(transfers)
+
+
 def _ron_transfers(
     result: WinResult,
     *,
+    dealer_seat: Seat,
     honba: int,
     rules: RuleSet,
 ) -> tuple[SettlementTransfer, ...]:
@@ -545,18 +817,33 @@ def _ron_transfers(
         result.winners,
         key=lambda item: _SEAT_ORDER.index(item.seat),
     ):
-        ron_payment, _, _ = _score_payments(winner)
-        assert ron_payment is not None
-
-        transfers.append(
-            SettlementTransfer(
-                source_seat,
-                winner.seat,
-                ron_payment,
-                TransferReason.RON,
-                winner.seat,
-            )
+        responsibility = _pao_responsibility(
+            winner,
+            rules,
         )
+
+        if responsibility is None:
+            ron_payment, _, _ = _score_payments(winner)
+            assert ron_payment is not None
+            transfers.append(
+                SettlementTransfer(
+                    source_seat,
+                    winner.seat,
+                    ron_payment,
+                    TransferReason.RON,
+                    winner.seat,
+                )
+            )
+        else:
+            transfers.extend(
+                _pao_ron_base_transfers(
+                    winner,
+                    source_seat=source_seat,
+                    dealer_seat=dealer_seat,
+                    responsibility=responsibility,
+                    rules=rules,
+                )
+            )
 
     honba_points = honba * rules.ron_honba_points
     if honba_points:
@@ -564,9 +851,18 @@ def _ron_transfers(
             result,
             rules,
         )
+        award_winner = next(
+            winner for winner in result.winners if winner.seat is award_seat
+        )
+        responsibility = _pao_responsibility(
+            award_winner,
+            rules,
+        )
+        honba_payer = responsibility.seat if responsibility is not None else source_seat
+
         transfers.append(
             SettlementTransfer(
-                source_seat,
+                honba_payer,
                 award_seat,
                 honba_points,
                 TransferReason.HONBA,
@@ -603,6 +899,110 @@ def _multiple_ron_honba_award_seat(
     )
 
 
+def _pao_tsumo_transfers(
+    winner: WinningPlayerResult,
+    *,
+    dealer_seat: Seat,
+    honba: int,
+    responsibility: _PaoResponsibility,
+    rules: RuleSet,
+) -> tuple[SettlementTransfer, ...]:
+    winner_points = _winner_points(winner)
+
+    honba_points = honba * rules.tsumo_honba_points_per_payer * (rules.player_count - 1)
+
+    if (
+        rules.pao_compound_yakuman_policy is PaoCompoundYakumanPolicy.FULL_HAND
+        or responsibility.other_units == 0
+    ):
+        transfers = [
+            SettlementTransfer(
+                responsibility.seat,
+                winner.seat,
+                winner_points,
+                TransferReason.PAO_TSUMO,
+                winner.seat,
+            )
+        ]
+
+        if honba_points:
+            transfers.append(
+                SettlementTransfer(
+                    responsibility.seat,
+                    winner.seat,
+                    honba_points,
+                    TransferReason.HONBA,
+                    winner.seat,
+                )
+            )
+
+        return tuple(transfers)
+
+    responsible_score = calculate_score(
+        han=0,
+        fu=None,
+        method=WinMethod.TSUMO,
+        is_dealer=winner.seat is dealer_seat,
+        yakuman_units=responsibility.responsible_units,
+        rules=rules,
+    )
+    other_score = calculate_score(
+        han=0,
+        fu=None,
+        method=WinMethod.TSUMO,
+        is_dealer=winner.seat is dealer_seat,
+        yakuman_units=responsibility.other_units,
+        rules=rules,
+    )
+
+    if responsible_score.winner_points + other_score.winner_points != winner_points:
+        raise ValueError("split pao tsumo payments must match evaluated score")
+
+    transfers = [
+        SettlementTransfer(
+            responsibility.seat,
+            winner.seat,
+            responsible_score.winner_points,
+            TransferReason.PAO_TSUMO,
+            winner.seat,
+        )
+    ]
+
+    if honba_points:
+        transfers.append(
+            SettlementTransfer(
+                responsibility.seat,
+                winner.seat,
+                honba_points,
+                TransferReason.HONBA,
+                winner.seat,
+            )
+        )
+
+    for payer in _SEAT_ORDER:
+        if payer is winner.seat:
+            continue
+
+        payment = (
+            other_score.tsumo_dealer_payment
+            if payer is dealer_seat
+            else other_score.tsumo_non_dealer_payment
+        )
+        assert payment is not None
+
+        transfers.append(
+            SettlementTransfer(
+                payer,
+                winner.seat,
+                payment,
+                TransferReason.TSUMO,
+                winner.seat,
+            )
+        )
+
+    return tuple(transfers)
+
+
 def _single_tsumo_transfers(
     winner: WinningPlayerResult,
     *,
@@ -610,6 +1010,19 @@ def _single_tsumo_transfers(
     honba: int,
     rules: RuleSet,
 ) -> tuple[SettlementTransfer, ...]:
+    responsibility = _pao_responsibility(
+        winner,
+        rules,
+    )
+    if responsibility is not None:
+        return _pao_tsumo_transfers(
+            winner,
+            dealer_seat=dealer_seat,
+            honba=honba,
+            responsibility=responsibility,
+            rules=rules,
+        )
+
     _, dealer_payment, non_dealer_payment = _score_payments(winner)
 
     honba_payment = honba * rules.tsumo_honba_points_per_payer
