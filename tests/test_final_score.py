@@ -7,6 +7,7 @@ from lisjong_engine.final_score import (
     _to_internal_points,
     calculate_bankruptcy_points,
     calculate_bankruptcy_points_for_seats,
+    calculate_bankruptcy_points_from_transfers,
     calculate_final_scores,
 )
 from lisjong_engine.rules import (
@@ -15,6 +16,10 @@ from lisjong_engine.rules import (
     RuleSet,
 )
 from lisjong_engine.seat import Seat
+from lisjong_engine.settlement import (
+    SettlementTransfer,
+    TransferReason,
+)
 
 _DEFAULT_RULES = RuleSet.default()
 
@@ -261,6 +266,180 @@ class BankruptcyPointsTest(unittest.TestCase):
             calculate_bankruptcy_points(Seat.EAST, ("south",))
         with self.assertRaises(ValueError):
             calculate_bankruptcy_points_for_seats((Seat.EAST, Seat.EAST), (Seat.SOUTH,))
+
+    def test_derives_single_recipient_from_transfers(self) -> None:
+        transfers = (
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.SOUTH,
+                8_000,
+                TransferReason.RON,
+                Seat.SOUTH,
+            ),
+        )
+
+        adjustments = calculate_bankruptcy_points_from_transfers(
+            (Seat.EAST,),
+            transfers,
+        )
+
+        self.assertEqual(
+            adjustments,
+            {
+                Seat.EAST: -10,
+                Seat.SOUTH: 10,
+                Seat.WEST: 0,
+                Seat.NORTH: 0,
+            },
+        )
+
+    def test_multiple_transfer_recipients_share_bonus(self) -> None:
+        transfers = (
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.SOUTH,
+                8_000,
+                TransferReason.RON,
+                Seat.SOUTH,
+            ),
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.WEST,
+                8_000,
+                TransferReason.RON,
+                Seat.WEST,
+            ),
+        )
+
+        adjustments = calculate_bankruptcy_points_from_transfers(
+            (Seat.EAST,),
+            transfers,
+        )
+
+        self.assertEqual(
+            adjustments,
+            {
+                Seat.EAST: -10,
+                Seat.SOUTH: 5,
+                Seat.WEST: 5,
+                Seat.NORTH: 0,
+            },
+        )
+
+    def test_transfer_recipient_remainder_uses_bankrupt_seat_order(
+        self,
+    ) -> None:
+        transfers = (
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.SOUTH,
+                1_000,
+                TransferReason.NOTEN_PENALTY,
+            ),
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.WEST,
+                1_000,
+                TransferReason.NOTEN_PENALTY,
+            ),
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.NORTH,
+                1_000,
+                TransferReason.NOTEN_PENALTY,
+            ),
+        )
+
+        adjustments = calculate_bankruptcy_points_from_transfers(
+            (Seat.EAST,),
+            transfers,
+        )
+
+        self.assertEqual(
+            adjustments,
+            {
+                Seat.EAST: -10,
+                Seat.SOUTH: 4,
+                Seat.WEST: 3,
+                Seat.NORTH: 3,
+            },
+        )
+
+    def test_each_bankrupt_seat_uses_its_own_transfer_recipients(
+        self,
+    ) -> None:
+        transfers = (
+            SettlementTransfer(
+                Seat.EAST,
+                Seat.WEST,
+                4_000,
+                TransferReason.NAGASHI_MANGAN,
+                Seat.WEST,
+            ),
+            SettlementTransfer(
+                Seat.SOUTH,
+                Seat.NORTH,
+                4_000,
+                TransferReason.NAGASHI_MANGAN,
+                Seat.NORTH,
+            ),
+        )
+
+        adjustments = calculate_bankruptcy_points_from_transfers(
+            (Seat.EAST, Seat.SOUTH),
+            transfers,
+        )
+
+        self.assertEqual(
+            adjustments,
+            {
+                Seat.EAST: -10,
+                Seat.SOUTH: -10,
+                Seat.WEST: 10,
+                Seat.NORTH: 10,
+            },
+        )
+
+    def test_rejects_when_recipient_cannot_be_derived_from_transfers(
+        self,
+    ) -> None:
+        transfers = (
+            SettlementTransfer(
+                Seat.SOUTH,
+                Seat.WEST,
+                8_000,
+                TransferReason.RON,
+                Seat.WEST,
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot be determined",
+        ):
+            calculate_bankruptcy_points_from_transfers(
+                (Seat.EAST,),
+                transfers,
+            )
+
+    def test_rejects_invalid_transfer_inputs(self) -> None:
+        with self.assertRaises(TypeError):
+            calculate_bankruptcy_points_from_transfers(
+                ("east",),
+                (),
+            )
+
+        with self.assertRaises(ValueError):
+            calculate_bankruptcy_points_from_transfers(
+                (Seat.EAST, Seat.EAST),
+                (),
+            )
+
+        with self.assertRaises(TypeError):
+            calculate_bankruptcy_points_from_transfers(
+                (Seat.EAST,),
+                ("transfer",),
+            )
 
 
 class InternalPointUnitTest(unittest.TestCase):

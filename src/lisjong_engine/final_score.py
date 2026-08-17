@@ -7,6 +7,10 @@ from lisjong_engine.rules import (
     RuleSet,
 )
 from lisjong_engine.seat import Seat
+from lisjong_engine.settlement import (
+    SettlementTransfer,
+    TransferReason,
+)
 
 _SEAT_ORDER = tuple(Seat)
 
@@ -364,6 +368,77 @@ def calculate_bankruptcy_points_for_seats(
         raise TypeError("recipient_seats must be an iterable of Seat values") from None
     return calculate_bankruptcy_points_by_seat(
         {seat: recipients for seat in bankrupts}, rules=rules
+    )
+
+
+def calculate_bankruptcy_points_from_transfers(
+    bankrupt_seats: Iterable[Seat],
+    settlement_transfers: Iterable[SettlementTransfer],
+    *,
+    rules: RuleSet | None = None,
+) -> dict[Seat, int]:
+    """破産席が実際に支払ったtransferから飛び賞recipientを導出する。"""
+    try:
+        bankrupts = tuple(bankrupt_seats)
+    except TypeError:
+        raise TypeError("bankrupt_seats must be an iterable of Seat values") from None
+
+    if any(not isinstance(seat, Seat) for seat in bankrupts):
+        raise TypeError("bankrupt_seats must contain only Seat values")
+    if len(set(bankrupts)) != len(bankrupts):
+        raise ValueError("bankrupt_seats must be unique")
+
+    try:
+        transfers = tuple(settlement_transfers)
+    except TypeError:
+        raise TypeError("settlement_transfers must be an iterable") from None
+
+    if any(not isinstance(transfer, SettlementTransfer) for transfer in transfers):
+        raise TypeError(
+            "settlement_transfers must contain only SettlementTransfer instances"
+        )
+
+    if rules is None:
+        rules = RuleSet.default()
+    elif not isinstance(rules, RuleSet):
+        raise TypeError("rules must be RuleSet")
+
+    eligible_reasons = frozenset(
+        {
+            TransferReason.RON,
+            TransferReason.TSUMO,
+            TransferReason.PAO_RON,
+            TransferReason.PAO_TSUMO,
+            TransferReason.HONBA,
+            TransferReason.NOTEN_PENALTY,
+            TransferReason.NAGASHI_MANGAN,
+        }
+    )
+
+    recipients_by_bankrupt: dict[Seat, tuple[Seat, ...]] = {}
+
+    for bankrupt_seat in bankrupts:
+        recipients = tuple(
+            seat
+            for seat in _SEAT_ORDER
+            if any(
+                transfer.payer is bankrupt_seat
+                and transfer.recipient is seat
+                and transfer.reason in eligible_reasons
+                for transfer in transfers
+            )
+        )
+
+        if not recipients:
+            raise ValueError(
+                "bankruptcy bonus recipients cannot be determined from transfers"
+            )
+
+        recipients_by_bankrupt[bankrupt_seat] = recipients
+
+    return calculate_bankruptcy_points_by_seat(
+        recipients_by_bankrupt,
+        rules=rules,
     )
 
 
