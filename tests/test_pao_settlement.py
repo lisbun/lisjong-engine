@@ -125,6 +125,34 @@ def _compound_daisangen_tsuuiisou_context(
     )
 
 
+def _daisuushii_context(
+    pool: _TilePool,
+    *,
+    dealer_seat: Seat,
+    winner_seat: Seat,
+    method: WinMethod,
+    origin: WinOrigin,
+    pao_seat: Seat,
+) -> WinningContext:
+    melds = (
+        _pon(pool, "1z", Seat.EAST),
+        _pon(pool, "2z", Seat.EAST),
+        _pon(pool, "3z", Seat.EAST),
+        _pon(pool, "4z", pao_seat),
+    )
+    concealed_tiles = pool.take("1m", "1m")
+
+    return WinningContext(
+        concealed_tiles=concealed_tiles,
+        winning_tile=concealed_tiles[-1],
+        method=method,
+        origin=origin,
+        seat_wind=_seat_wind(winner_seat, dealer_seat),
+        prevailing_wind=Wind.EAST,
+        declared_melds=melds,
+    )
+
+
 def _suukantsu_context(
     pool: _TilePool,
     *,
@@ -299,6 +327,60 @@ class FullHandPaoSettlementTest(unittest.TestCase):
                     TransferReason.PAO_RON,
                     Seat.SOUTH,
                 ),
+            ),
+        )
+
+    def test_daisuushii_tsumo_full_hand(self) -> None:
+        rules = RuleSet.default()
+        pool = _TilePool()
+
+        context = _daisuushii_context(
+            pool,
+            dealer_seat=Seat.EAST,
+            winner_seat=Seat.SOUTH,
+            method=WinMethod.TSUMO,
+            origin=WinOrigin.LIVE_WALL,
+            pao_seat=Seat.WEST,
+        )
+        winner = _winner(
+            Seat.SOUTH,
+            context,
+            rules=rules,
+        )
+        result = _tsumo_result(winner)
+
+        self.assertTrue(
+            any(
+                Yaku.DAISUUSHII in candidate.hand_value.yaku_evaluation.yakus
+                for candidate in winner.score_selection.max_score_candidates
+            )
+        )
+
+        transfers = calculate_win_settlement_transfers(
+            result,
+            dealer_seat=Seat.EAST,
+            rules=rules,
+        )
+
+        self.assertEqual(
+            transfers,
+            (
+                SettlementTransfer(
+                    Seat.WEST,
+                    Seat.SOUTH,
+                    32_000,
+                    TransferReason.PAO_TSUMO,
+                    Seat.SOUTH,
+                ),
+            ),
+        )
+        self.assertEqual(
+            aggregate_settlement_transfers(transfers),
+            SeatPoints(
+                0,
+                32_000,
+                -32_000,
+                0,
             ),
         )
 

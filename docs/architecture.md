@@ -306,6 +306,101 @@ moduleへ分離する。`RoundState` / `PlayerState` / `Wall`のmutable object�
 semantic tenpaiであり、役の有無では判定しない。流し満貫は独立したterminal causeにせず、
 `ExhaustiveDrawResult.nagashi_mangan_seats`として扱う。
 
+## 局精算（Round settlement）
+
+E3が確定する `RoundResult` から、1局分の点数移動をpureに計算する層を
+`settlement.py` へ置く（Issue #21）。`RoundState` や `Wall` 等のmutable
+objectは受け取らず、局終了時点で確定済みのfactだけを入力とする。
+
+```text
+RoundResult
++ dealer seat
++ honba
++ riichi sticks before round settlement
++ current-round RiichiContribution
++ RuleSet
+        ↓
+calculate_round_settlement(...)
+        ↓
+RoundSettlement
+```
+
+`RoundSettlement` から、呼び出し側は少なくとも次を取得できる。
+
+- 席別 `point_deltas`（`SeatPoints`）
+- player間の `SettlementTransfer`（Ron / Tsumo / Pao Ron / Pao Tsumo / 本場 /
+  ノーテン罰符 / 流し満貫を含む、監査可能な個別移動）
+- 今局で成立した `RiichiContribution`
+- 今局で確定した `RiichiStickAward`（和了による供託獲得）
+- settlement後にcarryされる供託本数 `riichi_sticks_after`
+
+`calculate_round_settlement()` は、返す `RoundSettlement` について
+
+```text
+sum(point_deltas) + (riichi_sticks_after - riichi_sticks_before) * riichi_stick_points = 0
+```
+
+という価値保存を自ら検証し、崩れていれば `ValueError` でfail closedする。
+供託棒はplayerの点数そのものではなく、卓上に留保された価値だからである。
+
+Ron / Tsumoの通常精算に加え、大三元・大四喜・四槓子のパオ（責任払い）も
+この層が扱う。`RuleSet.pao_compound_yakuman_policy` により、パオ対象役満と
+対象外役満が複合したときの責任範囲を `FULL_HAND` と
+`RESPONSIBLE_YAKUMAN_ONLY` から選べる。`RESPONSIBLE_YAKUMAN_ONLY` かつ
+`multiple_yakuman_enabled=False` で複合役満を分割できない場合は、
+黙って1つを選ばずfail closedする。
+
+### scoringとの責務境界
+
+局精算は、和了確定時に`WinningScoreSelection`へ保持された評価済みの
+
+```text
+WinningScoreSelection.max_score_candidates
+```
+
+を使用し、役・符・ドラを局精算層で再評価しない。パオの責任対象判定も、
+`HandValueEvaluation` / `YakuEvaluation` が既に保持している成立役・
+役満倍率のfactを参照するだけであり、`evaluate_yaku()` 等のscoring
+そのものを再実行しない。
+
+同点の最高得点候補が複数存在しても、精算に必要な支払額（`ron_payment`、
+`tsumo_dealer_payment`、`tsumo_non_dealer_payment`）が候補間で一致しない
+場合は、局精算側が任意の1件を選ばず `ValueError` で拒否する。得点評価層が
+複数の和了解釈を意図的に潰さずに保持する契約（本書「得点評価層」参照）を、
+精算層が誤った代表選択で壊さないためのfail-closed境界である。
+
+### F1 / F2 境界
+
+Issue #21のscopeはF1（局精算のpure計算）のみであり、MatchState等の状態機械や
+半荘進行そのものは含まない。
+
+```text
+RoundSettlement apply
+ -> scores_after_round
+ -> F2 determines continuation / match end / bankruptcy
+ -> bankruptcy adjustment
+ -> final remaining riichi stick award
+ -> calculate_final_scores()
+```
+
+F1が提供するのは次のpure calculation layerである。
+
+- `calculate_round_settlement()`
+- `calculate_final_riichi_stick_awards()`（半荘終了確定後の残存供託棒配分）
+- bankruptcy adjustment pure helpers（`calculate_bankruptcy_points_by_seat()`
+  等、飛びによる点数調整の計算だけを行い、飛び自体の判定は行わない）
+- `calculate_final_scores()`（粗点・ウマ・オカ・順位点の最終計算）
+
+一方、次はF2の責務としてF1へ持ち込まない。
+
+- `MatchState`
+- 局番号進行
+- 親継続判定
+- 本場更新
+- match終了判定
+- 飛び判定そのもの（飛んだ席が生じたかどうかの判定）
+- deterministic round seed allocation
+
 ## Determinism
 
 engineのテスト・回帰確認・AI評価へ利用できるよう、同じversion、`RuleSet`、seed、入力系列から

@@ -1,14 +1,19 @@
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 from lisjong_engine.points import SeatPoints
 from lisjong_engine.riichi_event import RiichiContribution
+from lisjong_engine.rules import (
+    FinalRankTiePolicy,
+    RuleSet,
+)
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import (
     RiichiStickAward,
     RoundSettlement,
     SettlementTransfer,
     TransferReason,
+    calculate_final_riichi_stick_awards,
 )
 
 
@@ -262,6 +267,198 @@ class SettlementTransferTest(unittest.TestCase):
                 amount=1_000,
                 reason=TransferReason.NOTEN_PENALTY,
                 winner_seat=Seat.SOUTH,
+            )
+
+
+class FinalRiichiStickAwardTest(unittest.TestCase):
+    def test_seat_order_awards_all_sticks_to_first_place(self) -> None:
+        awards = calculate_final_riichi_stick_awards(
+            SeatPoints(
+                40_000,
+                30_000,
+                20_000,
+                10_000,
+            ),
+            2,
+        )
+
+        self.assertEqual(
+            awards,
+            (
+                RiichiStickAward(
+                    Seat.EAST,
+                    2_000,
+                ),
+            ),
+        )
+
+    def test_seat_order_breaks_top_tie_by_initial_seat_order(
+        self,
+    ) -> None:
+        awards = calculate_final_riichi_stick_awards(
+            SeatPoints(
+                30_000,
+                30_000,
+                20_000,
+                20_000,
+            ),
+            1,
+        )
+
+        self.assertEqual(
+            awards,
+            (
+                RiichiStickAward(
+                    Seat.EAST,
+                    1_000,
+                ),
+            ),
+        )
+
+    def test_split_rank_points_splits_between_tied_top_seats(
+        self,
+    ) -> None:
+        rules = replace(
+            RuleSet.default(),
+            final_rank_tie_policy=(FinalRankTiePolicy.SPLIT_RANK_POINTS),
+        )
+
+        awards = calculate_final_riichi_stick_awards(
+            SeatPoints(
+                30_000,
+                30_000,
+                20_000,
+                20_000,
+            ),
+            3,
+            rules=rules,
+        )
+
+        self.assertEqual(
+            awards,
+            (
+                RiichiStickAward(Seat.EAST, 1_500),
+                RiichiStickAward(Seat.SOUTH, 1_500),
+            ),
+        )
+
+    def test_split_remainder_uses_seat_order(self) -> None:
+        rules = replace(
+            RuleSet.default(),
+            final_rank_tie_policy=(FinalRankTiePolicy.SPLIT_RANK_POINTS),
+        )
+
+        awards = calculate_final_riichi_stick_awards(
+            SeatPoints(
+                30_000,
+                30_000,
+                30_000,
+                10_000,
+            ),
+            1,
+            rules=rules,
+        )
+
+        self.assertEqual(
+            awards,
+            (
+                RiichiStickAward(Seat.EAST, 400),
+                RiichiStickAward(Seat.SOUTH, 300),
+                RiichiStickAward(Seat.WEST, 300),
+            ),
+        )
+
+    def test_custom_riichi_stick_points_are_used(self) -> None:
+        rules = replace(
+            RuleSet.default(),
+            final_rank_tie_policy=(FinalRankTiePolicy.SPLIT_RANK_POINTS),
+            riichi_stick_points=1_100,
+        )
+
+        awards = calculate_final_riichi_stick_awards(
+            SeatPoints(
+                30_000,
+                30_000,
+                30_000,
+                10_000,
+            ),
+            1,
+            rules=rules,
+        )
+
+        self.assertEqual(
+            awards,
+            (
+                RiichiStickAward(Seat.EAST, 400),
+                RiichiStickAward(Seat.SOUTH, 400),
+                RiichiStickAward(Seat.WEST, 300),
+            ),
+        )
+
+    def test_zero_sticks_produce_no_awards(self) -> None:
+        self.assertEqual(
+            calculate_final_riichi_stick_awards(
+                SeatPoints(25_000, 25_000, 25_000, 25_000),
+                0,
+            ),
+            (),
+        )
+
+    def test_rejects_split_amount_not_expressible_in_hundreds(
+        self,
+    ) -> None:
+        rules = replace(
+            RuleSet.default(),
+            final_rank_tie_policy=(FinalRankTiePolicy.SPLIT_RANK_POINTS),
+            riichi_stick_points=1_050,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "100-point",
+        ):
+            calculate_final_riichi_stick_awards(
+                SeatPoints(
+                    30_000,
+                    30_000,
+                    20_000,
+                    20_000,
+                ),
+                1,
+                rules=rules,
+            )
+
+    def test_rejects_invalid_inputs(self) -> None:
+        scores = SeatPoints(
+            40_000,
+            30_000,
+            20_000,
+            10_000,
+        )
+
+        with self.assertRaises(TypeError):
+            calculate_final_riichi_stick_awards(
+                "scores",
+                1,
+            )
+
+        with self.assertRaises(TypeError):
+            calculate_final_riichi_stick_awards(
+                scores,
+                True,
+            )
+
+        with self.assertRaises(ValueError):
+            calculate_final_riichi_stick_awards(
+                scores,
+                -1,
+            )
+
+        with self.assertRaises(TypeError):
+            calculate_final_riichi_stick_awards(
+                scores,
+                1,
+                rules="rules",
             )
 
 

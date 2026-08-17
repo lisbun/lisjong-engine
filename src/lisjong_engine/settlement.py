@@ -14,6 +14,7 @@ from lisjong_engine.round_result import (
     WinResult,
 )
 from lisjong_engine.rules import (
+    FinalRankTiePolicy,
     MultipleRonAwardPolicy,
     PaoCompoundYakumanPolicy,
     RonResolutionPolicy,
@@ -635,6 +636,72 @@ def calculate_round_settlement(
         )
 
     return settlement
+
+
+def calculate_final_riichi_stick_awards(
+    scores: SeatPoints,
+    riichi_sticks: int,
+    *,
+    rules: RuleSet | None = None,
+) -> tuple[RiichiStickAward, ...]:
+    """半荘終了確定後に残存riichi sticksを最終1位席群へ配分する。"""
+    if not isinstance(scores, SeatPoints):
+        raise TypeError("scores must be SeatPoints")
+    if type(riichi_sticks) is not int:
+        raise TypeError("riichi_sticks must be an int")
+    if riichi_sticks < 0:
+        raise ValueError("riichi_sticks must be non-negative")
+
+    if rules is None:
+        rules = RuleSet.default()
+    elif not isinstance(rules, RuleSet):
+        raise TypeError("rules must be a RuleSet")
+
+    if riichi_sticks == 0:
+        return ()
+
+    top_seats = _final_top_seats(scores, rules)
+    total_amount = riichi_sticks * rules.riichi_stick_points
+
+    if len(top_seats) == 1:
+        return (
+            RiichiStickAward(
+                top_seats[0],
+                total_amount,
+            ),
+        )
+
+    if total_amount % 100:
+        raise ValueError("riichi stick amount must be expressible in 100-point units")
+
+    total_units = total_amount // 100
+    quotient, remainder = divmod(
+        total_units,
+        len(top_seats),
+    )
+
+    return tuple(
+        RiichiStickAward(
+            seat,
+            (quotient + (1 if index < remainder else 0)) * 100,
+        )
+        for index, seat in enumerate(top_seats)
+    )
+
+
+def _final_top_seats(
+    scores: SeatPoints,
+    rules: RuleSet,
+) -> tuple[Seat, ...]:
+    top_score = max(scores[seat] for seat in Seat)
+
+    if rules.final_rank_tie_policy is FinalRankTiePolicy.SEAT_ORDER:
+        return (next(seat for seat in _SEAT_ORDER if scores[seat] == top_score),)
+
+    if rules.final_rank_tie_policy is FinalRankTiePolicy.SPLIT_RANK_POINTS:
+        return tuple(seat for seat in _SEAT_ORDER if scores[seat] == top_score)
+
+    raise ValueError("unsupported final rank tie policy")
 
 
 def aggregate_settlement_transfers(

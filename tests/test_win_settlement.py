@@ -1,5 +1,5 @@
 import unittest
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from lisjong_engine.dora import DoraIndicators
 from lisjong_engine.points import SeatPoints
@@ -9,6 +9,7 @@ from lisjong_engine.round_result import (
     WinResult,
 )
 from lisjong_engine.rules import RonResolutionPolicy, RuleSet
+from lisjong_engine.score import ScoreCalculation
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import (
     RiichiStickAward,
@@ -26,7 +27,38 @@ from lisjong_engine.win_context import (
     WinOrigin,
 )
 from lisjong_engine.wind import Wind
-from lisjong_engine.winning_score import evaluate_winning_scores
+from lisjong_engine.winning_score import (
+    WinningScoreCandidate,
+    WinningScoreSelection,
+    evaluate_winning_scores,
+)
+
+
+def _score_with_payments(
+    template: ScoreCalculation,
+    *,
+    tsumo_dealer_payment: int,
+    tsumo_non_dealer_payment: int,
+) -> ScoreCalculation:
+    """`ScoreCalculation`の内部整合性checkを経由せず、payment fieldだけを
+    差し替えたcopyを組み立てる。
+
+    `calculate_score()`の丸め処理はdealer/non-dealer paymentが常に同じ
+    baseから同時に導出されるため、production契約上は同じ`winner_points`で
+    paymentが食い違う候補を実際には作れない。それでもsettlement層は
+    このケースをfail closedで扱う契約になっているため、production APIを
+    経由せずtest内だけでこの状態を直接組み立てて分岐を固定する。
+    """
+    score = object.__new__(ScoreCalculation)
+    for field in fields(template):
+        object.__setattr__(score, field.name, getattr(template, field.name))
+    object.__setattr__(score, "tsumo_dealer_payment", tsumo_dealer_payment)
+    object.__setattr__(
+        score,
+        "tsumo_non_dealer_payment",
+        tsumo_non_dealer_payment,
+    )
+    return score
 
 
 def _seat_wind(seat: Seat, dealer_seat: Seat) -> Wind:
@@ -456,6 +488,62 @@ class SingleWinSettlementTest(unittest.TestCase):
                         **keywords,
                     )
 
+    def test_rejects_max_score_candidates_with_disagreeing_payments(
+        self,
+    ) -> None:
+        rules = RuleSet.default()
+        winner = _winning_player(
+            Seat.SOUTH,
+            method=WinMethod.TSUMO,
+            rules=rules,
+        )
+        (base_candidate,) = tuple(winner.score_selection.max_score_candidates)
+
+        candidate_a = WinningScoreCandidate(
+            hand_value=base_candidate.hand_value,
+            score=_score_with_payments(
+                base_candidate.score,
+                tsumo_dealer_payment=1_600,
+                tsumo_non_dealer_payment=800,
+            ),
+        )
+        candidate_b = WinningScoreCandidate(
+            hand_value=base_candidate.hand_value,
+            score=_score_with_payments(
+                base_candidate.score,
+                tsumo_dealer_payment=2_000,
+                tsumo_non_dealer_payment=600,
+            ),
+        )
+        self.assertEqual(candidate_a.winner_points, candidate_b.winner_points)
+
+        selection = WinningScoreSelection(
+            candidates=frozenset({candidate_a, candidate_b}),
+            max_score_candidates=frozenset({candidate_a, candidate_b}),
+        )
+        conflicted_winner = WinningPlayerResult(
+            seat=winner.seat,
+            context=winner.context,
+            score_selection=selection,
+        )
+        result = WinResult(
+            method=WinMethod.TSUMO,
+            origin=WinOrigin.LIVE_WALL,
+            winning_tile=conflicted_winner.context.winning_tile,
+            winners=(conflicted_winner,),
+            dora_indicators=DoraIndicators(),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "maximum score candidates must have identical payments",
+        ):
+            calculate_win_settlement_transfers(
+                result,
+                dealer_seat=Seat.EAST,
+                rules=rules,
+            )
+
 
 class RoundSettlementWinIntegrationTest(unittest.TestCase):
     def test_win_awards_existing_and_current_riichi_sticks(
@@ -591,6 +679,28 @@ class RoundSettlementWinIntegrationTest(unittest.TestCase):
                         Seat.WEST,
                         500,
                     ),
+                ),
+            )
+
+    def test_rejects_duplicate_riichi_contributions_for_the_same_seat(
+        self,
+    ) -> None:
+        result = _win_result(
+            Seat.SOUTH,
+            method=WinMethod.RON,
+            source_seat=Seat.EAST,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "riichi contribution seats must be unique",
+        ):
+            calculate_round_settlement(
+                result,
+                dealer_seat=Seat.EAST,
+                riichi_contributions=(
+                    RiichiContribution(Seat.WEST, 1_000),
+                    RiichiContribution(Seat.WEST, 1_000),
                 ),
             )
 
