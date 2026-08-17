@@ -19,7 +19,12 @@ from lisjong_engine.round_allocation import (
     create_round_random_provenance,
     create_round_wall,
 )
-from lisjong_engine.round_result import RoundResult
+from lisjong_engine.round_result import (
+    AbortiveDrawResult,
+    ExhaustiveDrawResult,
+    RoundResult,
+    WinResult,
+)
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.rules import MatchFormat, RuleSet
 from lisjong_engine.seat import Seat
@@ -318,3 +323,84 @@ def _resolve_starting_scores(
     if isinstance(starting_scores, SeatPoints):
         return starting_scores
     return SeatPoints.from_mapping(starting_scores)
+
+
+def _dealer_continues(
+    result: RoundResult,
+    dealer_seat: Seat,
+) -> bool:
+    """局終了resultから、親が継続するかどうかをpureに判定する。
+
+    和了はdealerがwinnerに含まれる場合（複数ロンでも同様）だけ継続する。
+    途中流局は理由に関わらず常に継続する。荒牌流局はdealerが
+    `tenpai_seats`に含まれる場合だけ継続する。
+    """
+    if not isinstance(result, RoundResult):
+        raise TypeError("result must be a RoundResult")
+    if not isinstance(dealer_seat, Seat):
+        raise TypeError("dealer_seat must be a Seat")
+
+    if isinstance(result, WinResult):
+        return any(winner.seat is dealer_seat for winner in result.winners)
+    if isinstance(result, AbortiveDrawResult):
+        return True
+    return dealer_seat in result.tenpai_seats
+
+
+def _next_round_position(
+    position: RoundPosition,
+    result: RoundResult,
+    dealer_continues: bool,
+    *,
+    riichi_sticks: int,
+) -> RoundPosition:
+    """現在positionと局終了factから、続行する場合のnext positionをpureに計算する。
+
+    親が流れる場合の本場は、和了によるものなら0へ戻り、荒牌流局・途中流局
+    によるものなら+1する。`riichi_sticks`はcallerがsettlement後に卓上へ
+    残ると判断した本数をそのまま引き継ぐだけで、本helper自身は供託の
+    増減を計算しない。
+
+    West4での親流れのように、そもそも成立しない`RoundPosition`（本
+    contractでは北場を対局位置として扱わない）を要求された場合は、
+    `RoundPosition`自身のvalidationにより`ValueError`でfail closedする。
+    仮想的なNorth1を代わりに生成することはしない。
+    """
+    if not isinstance(position, RoundPosition):
+        raise TypeError("position must be a RoundPosition")
+    if not isinstance(result, RoundResult):
+        raise TypeError("result must be a RoundResult")
+    if type(dealer_continues) is not bool:
+        raise TypeError("dealer_continues must be a bool")
+    if type(riichi_sticks) is not int:
+        raise TypeError("riichi_sticks must be an int")
+    if riichi_sticks < 0:
+        raise ValueError("riichi_sticks must be non-negative")
+
+    if dealer_continues:
+        prevailing_wind = position.prevailing_wind
+        hand_number = position.hand_number
+        dealer_seat = position.dealer_seat
+    else:
+        dealer_seat = position.dealer_seat.next()
+        if position.hand_number == 4:
+            prevailing_wind = position.prevailing_wind.next()
+            hand_number = 1
+        else:
+            prevailing_wind = position.prevailing_wind
+            hand_number = position.hand_number + 1
+
+    honba = (
+        position.honba + 1
+        if dealer_continues
+        or isinstance(result, (ExhaustiveDrawResult, AbortiveDrawResult))
+        else 0
+    )
+
+    return RoundPosition(
+        prevailing_wind=prevailing_wind,
+        hand_number=hand_number,
+        dealer_seat=dealer_seat,
+        honba=honba,
+        riichi_sticks=riichi_sticks,
+    )

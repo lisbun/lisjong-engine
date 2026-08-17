@@ -2,6 +2,7 @@ import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
+from lisjong_engine.dora import DoraIndicators
 from lisjong_engine.final_score import calculate_final_scores
 from lisjong_engine.match_state import (
     CompletedMatch,
@@ -10,15 +11,85 @@ from lisjong_engine.match_state import (
     MatchPhase,
     MatchState,
     RoundPosition,
+    _dealer_continues,
+    _next_round_position,
 )
 from lisjong_engine.points import SeatPoints
 from lisjong_engine.round_allocation import create_round_random_provenance
 from lisjong_engine.round_phase import RoundPhase
-from lisjong_engine.round_result import ExhaustiveDrawResult
+from lisjong_engine.round_result import (
+    AbortiveDrawReason,
+    AbortiveDrawResult,
+    ExhaustiveDrawResult,
+    WinningPlayerResult,
+    WinResult,
+)
 from lisjong_engine.rules import MatchFormat, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import calculate_round_settlement
+from lisjong_engine.tile import STANDARD_TILES
+from lisjong_engine.win_context import WinMethod, WinningContext, WinOrigin
 from lisjong_engine.wind import Wind
+from lisjong_engine.winning_score import evaluate_winning_scores
+
+
+def _seat_wind(seat: Seat, dealer_seat: Seat) -> Wind:
+    seats = tuple(Seat)
+    distance = (seats.index(seat) - seats.index(dealer_seat)) % len(seats)
+    return tuple(Wind)[distance]
+
+
+def _winning_player(
+    seat: Seat,
+    *,
+    method: WinMethod,
+    dealer_seat: Seat = Seat.EAST,
+) -> WinningPlayerResult:
+    concealed_tiles = tuple(
+        STANDARD_TILES[tile_type_id * 4 + copy_index]
+        for tile_type_id in (0, 3, 6, 10, 14, 16, 20)
+        for copy_index in range(2)
+    )
+    winning_tile = concealed_tiles[-1]
+
+    context = WinningContext(
+        concealed_tiles=concealed_tiles,
+        winning_tile=winning_tile,
+        method=method,
+        origin=(WinOrigin.DISCARD if method is WinMethod.RON else WinOrigin.LIVE_WALL),
+        seat_wind=_seat_wind(seat, dealer_seat),
+        prevailing_wind=Wind.EAST,
+    )
+
+    return WinningPlayerResult(
+        seat=seat,
+        context=context,
+        score_selection=evaluate_winning_scores(
+            context,
+            dora_indicators=DoraIndicators(),
+        ),
+    )
+
+
+def _win_result(
+    winner_seats: tuple[Seat, ...],
+    *,
+    method: WinMethod,
+    dealer_seat: Seat = Seat.EAST,
+    source_seat: Seat | None = None,
+) -> WinResult:
+    winners = tuple(
+        _winning_player(seat, method=method, dealer_seat=dealer_seat)
+        for seat in winner_seats
+    )
+    return WinResult(
+        method=method,
+        origin=(WinOrigin.DISCARD if method is WinMethod.RON else WinOrigin.LIVE_WALL),
+        winning_tile=winners[0].context.winning_tile,
+        winners=winners,
+        dora_indicators=DoraIndicators(),
+        source_seat=source_seat,
+    )
 
 
 class RoundPositionTest(unittest.TestCase):
@@ -492,6 +563,435 @@ class StartRoundTest(unittest.TestCase):
         self.assertEqual(match.history, ())
         self.assertEqual(match._started_round_count, 0)
         self.assertIsNone(match._active_round_random_provenance)
+
+
+class DealerContinuesTest(unittest.TestCase):
+    def test_dealer_win_continues(self) -> None:
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.EAST,
+        )
+        self.assertTrue(_dealer_continues(result, Seat.EAST))
+
+    def test_child_win_does_not_continue(self) -> None:
+        result = _win_result(
+            (Seat.SOUTH,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.EAST,
+            source_seat=Seat.EAST,
+        )
+        self.assertFalse(_dealer_continues(result, Seat.EAST))
+
+    def test_multiple_ron_with_dealer_among_winners_continues(self) -> None:
+        result = _win_result(
+            (Seat.EAST, Seat.SOUTH),
+            method=WinMethod.RON,
+            dealer_seat=Seat.EAST,
+            source_seat=Seat.WEST,
+        )
+        self.assertTrue(_dealer_continues(result, Seat.EAST))
+
+    def test_exhaustive_draw_dealer_tenpai_continues(self) -> None:
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+        self.assertTrue(_dealer_continues(result, Seat.EAST))
+
+    def test_exhaustive_draw_dealer_noten_does_not_continue(self) -> None:
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.SOUTH,))
+        self.assertFalse(_dealer_continues(result, Seat.EAST))
+
+    def test_abortive_draw_always_continues(self) -> None:
+        result = AbortiveDrawResult(AbortiveDrawReason.FOUR_KANS)
+        self.assertTrue(_dealer_continues(result, Seat.EAST))
+
+    def test_rejects_invalid_result(self) -> None:
+        with self.assertRaises(TypeError):
+            _dealer_continues("not-a-result", Seat.EAST)
+
+    def test_rejects_invalid_dealer_seat(self) -> None:
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+        with self.assertRaises(TypeError):
+            _dealer_continues(result, "east")
+
+
+class NextRoundPositionTest(unittest.TestCase):
+    def test_dealer_win_keeps_hand_and_increments_honba(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=2,
+            riichi_sticks=3,
+        )
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.EAST,
+        )
+
+        next_position = _next_round_position(
+            position,
+            result,
+            True,
+            riichi_sticks=5,
+        )
+
+        self.assertEqual(
+            next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=3,
+                riichi_sticks=5,
+            ),
+        )
+
+    def test_dealer_tenpai_draw_keeps_hand_and_increments_honba(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=0,
+            riichi_sticks=0,
+        )
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+
+        next_position = _next_round_position(
+            position,
+            result,
+            True,
+            riichi_sticks=0,
+        )
+
+        self.assertEqual(
+            next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=1,
+                riichi_sticks=0,
+            ),
+        )
+
+    def test_abortive_draw_keeps_hand_and_increments_honba(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=0,
+            riichi_sticks=1,
+        )
+        result = AbortiveDrawResult(AbortiveDrawReason.FOUR_KANS)
+
+        next_position = _next_round_position(
+            position,
+            result,
+            True,
+            riichi_sticks=1,
+        )
+
+        self.assertEqual(
+            next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=1,
+                riichi_sticks=1,
+            ),
+        )
+
+    def test_child_win_rotates_dealer_and_resets_honba(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=3,
+            riichi_sticks=0,
+        )
+        result = _win_result(
+            (Seat.SOUTH,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.EAST,
+            source_seat=Seat.EAST,
+        )
+
+        next_position = _next_round_position(
+            position,
+            result,
+            False,
+            riichi_sticks=0,
+        )
+
+        self.assertEqual(
+            next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=2,
+                dealer_seat=Seat.SOUTH,
+                honba=0,
+                riichi_sticks=0,
+            ),
+        )
+
+    def test_dealer_noten_draw_rotates_dealer_and_increments_honba(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=3,
+            riichi_sticks=0,
+        )
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.SOUTH,))
+
+        next_position = _next_round_position(
+            position,
+            result,
+            False,
+            riichi_sticks=0,
+        )
+
+        self.assertEqual(
+            next_position,
+            RoundPosition(
+                prevailing_wind=Wind.EAST,
+                hand_number=2,
+                dealer_seat=Seat.SOUTH,
+                honba=4,
+                riichi_sticks=0,
+            ),
+        )
+
+    def test_east_four_flows_into_south_one(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=4,
+            dealer_seat=Seat.NORTH,
+            honba=0,
+            riichi_sticks=0,
+        )
+
+        child_win = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.SOUTH,
+        )
+        next_after_win = _next_round_position(
+            position,
+            child_win,
+            False,
+            riichi_sticks=0,
+        )
+        self.assertEqual(
+            next_after_win,
+            RoundPosition(
+                prevailing_wind=Wind.SOUTH,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=0,
+                riichi_sticks=0,
+            ),
+        )
+
+        dealer_noten_draw = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+        next_after_draw = _next_round_position(
+            position,
+            dealer_noten_draw,
+            False,
+            riichi_sticks=0,
+        )
+        self.assertEqual(
+            next_after_draw,
+            RoundPosition(
+                prevailing_wind=Wind.SOUTH,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=1,
+                riichi_sticks=0,
+            ),
+        )
+
+    def test_south_four_flows_into_west_one(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.SOUTH,
+            hand_number=4,
+            dealer_seat=Seat.NORTH,
+            honba=0,
+            riichi_sticks=0,
+        )
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.SOUTH,
+        )
+
+        next_position = _next_round_position(
+            position,
+            result,
+            False,
+            riichi_sticks=0,
+        )
+
+        self.assertEqual(
+            next_position,
+            RoundPosition(
+                prevailing_wind=Wind.WEST,
+                hand_number=1,
+                dealer_seat=Seat.EAST,
+                honba=0,
+                riichi_sticks=0,
+            ),
+        )
+
+    def test_west_four_dealer_continuation_stays_on_west_four(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.WEST,
+            hand_number=4,
+            dealer_seat=Seat.NORTH,
+            honba=1,
+            riichi_sticks=0,
+        )
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+
+        next_position = _next_round_position(
+            position,
+            result,
+            True,
+            riichi_sticks=0,
+        )
+
+        self.assertEqual(
+            next_position,
+            RoundPosition(
+                prevailing_wind=Wind.WEST,
+                hand_number=4,
+                dealer_seat=Seat.NORTH,
+                honba=2,
+                riichi_sticks=0,
+            ),
+        )
+
+    def test_west_four_dealer_flow_rejects_next_position(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.WEST,
+            hand_number=4,
+            dealer_seat=Seat.NORTH,
+            honba=0,
+            riichi_sticks=0,
+        )
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.SOUTH,
+        )
+
+        with self.assertRaises(ValueError):
+            _next_round_position(
+                position,
+                result,
+                False,
+                riichi_sticks=0,
+            )
+
+    def test_riichi_sticks_are_carried_verbatim(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=0,
+            riichi_sticks=0,
+        )
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.EAST,
+        )
+
+        next_position = _next_round_position(
+            position,
+            result,
+            True,
+            riichi_sticks=3,
+        )
+
+        self.assertEqual(next_position.riichi_sticks, 3)
+
+    def test_rejects_invalid_position(self) -> None:
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+        with self.assertRaises(TypeError):
+            _next_round_position(
+                "not-a-position",
+                result,
+                True,
+                riichi_sticks=0,
+            )
+
+    def test_rejects_invalid_result(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=0,
+            riichi_sticks=0,
+        )
+        with self.assertRaises(TypeError):
+            _next_round_position(
+                position,
+                "not-a-result",
+                True,
+                riichi_sticks=0,
+            )
+
+    def test_rejects_non_bool_dealer_continues(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=0,
+            riichi_sticks=0,
+        )
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+        with self.assertRaises(TypeError):
+            _next_round_position(
+                position,
+                result,
+                1,
+                riichi_sticks=0,
+            )
+
+    def test_rejects_invalid_riichi_sticks(self) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.EAST,
+            hand_number=1,
+            dealer_seat=Seat.EAST,
+            honba=0,
+            riichi_sticks=0,
+        )
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+
+        with self.assertRaises(TypeError):
+            _next_round_position(
+                position,
+                result,
+                True,
+                riichi_sticks=True,
+            )
+        with self.assertRaises(ValueError):
+            _next_round_position(
+                position,
+                result,
+                True,
+                riichi_sticks=-1,
+            )
 
 
 if __name__ == "__main__":
