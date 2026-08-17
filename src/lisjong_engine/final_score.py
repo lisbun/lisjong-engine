@@ -81,7 +81,7 @@ class FinalScoreCalculation:
                 "players must be ordered by standard competition ranking "
                 "(ties share the group's starting rank, e.g. (1, 1, 3, 4))"
             )
-        if {player.seat for player in players} != set(Seat):
+        if len(players) != len(Seat) or {player.seat for player in players} != set(Seat):
             raise ValueError("players must contain each seat exactly once")
         if sum(player.final_points for player in players) != 0:
             raise ValueError("final points must sum to zero")
@@ -189,8 +189,7 @@ def _calculate_split_rank_points(
     ウマ合計・オカを、それぞれ人数で均等分配する。
 
     各席の`uma_points + oka_points`を、修正前の「ウマ＋オカを合算して
-    から按分する」実装と同じ値へ一致させる必要があるため（Issue #127
-    レビュー指摘、決定B）、まず合算目標をこれまでどおり算出してから
+    から按分する」実装と同じ値へ一致させる必要があるため、まず合算目標をこれまでどおり算出してから
     ウマの内訳を差し引いてオカを逆算する。
 
     1. ウマは同点グループが占める順位帯の`rules.uma`を合算し、

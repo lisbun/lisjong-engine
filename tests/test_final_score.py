@@ -92,8 +92,7 @@ class CalculateFinalScoresTest(unittest.TestCase):
         self,
     ) -> None:
         """最終精算の基準点はreturn_pointsのみであり、終局判定用の
-        first_place_target_pointsは使用されないことを確認する
-        （Issue #50 Phase 6D-3A-2）。
+        first_place_target_pointsは使用されないことを確認する。
         """
         test_rules = replace(
             _DEFAULT_RULES,
@@ -265,7 +264,7 @@ class BankruptcyPointsTest(unittest.TestCase):
 
 
 class InternalPointUnitTest(unittest.TestCase):
-    """FinalScore内部単位（1 = 0.1ポイント）の変換契約を確認する（Issue #55）。"""
+    """FinalScore内部単位（1 = 0.1ポイント）の変換契約を確認する。"""
 
     def test_to_internal_points_converts_human_units_to_tenths(self) -> None:
         self.assertEqual(_to_internal_points(11), 110)
@@ -295,7 +294,7 @@ class InternalPointUnitTest(unittest.TestCase):
 
 
 class ExactNoRoundingTest(unittest.TestCase):
-    """EXACT_NO_ROUNDING方式（残差配分なしの粗点計算）を確認する（Issue #57）。"""
+    """EXACT_NO_ROUNDING方式（残差配分なしの粗点計算）を確認する。"""
 
     def _rules(self):
         return replace(
@@ -430,7 +429,7 @@ class FinalScoreModelTest(unittest.TestCase):
             FinalScoreCalculation((player,))
 
     def test_accepts_standard_competition_ranking_with_ties(self) -> None:
-        """Issue #75: 同点者が順位帯の先頭順位を共有する標準競技順位
+        """ 同点者が順位帯の先頭順位を共有する標準競技順位
         （例: 1位・2位同点なら双方rank=1、次点はrank=3）を受け入れる。
         """
         players = (
@@ -456,13 +455,20 @@ class FinalScoreModelTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             FinalScoreCalculation(players)
 
+    def test_rejects_duplicate_seat_even_when_all_seats_are_present(self) -> None:
+        players = (
+            FinalPlayerScore(Seat.EAST, 1, 40_000, 0, 300, 0, 0, 300),
+            FinalPlayerScore(Seat.SOUTH, 2, 30_000, 0, 100, 0, 0, 100),
+            FinalPlayerScore(Seat.WEST, 3, 20_000, 0, -100, 0, 0, -100),
+            FinalPlayerScore(Seat.NORTH, 4, 10_000, 0, -300, 0, 0, -300),
+            FinalPlayerScore(Seat.NORTH, 4, 10_000, 0, 0, 0, 0, 0),
+        )
+
+        with self.assertRaises(ValueError):
+            FinalScoreCalculation(players)
+
 
 class SplitRankPointsTest(unittest.TestCase):
-    """Mリーグ式の同点順位・順位点按分（`FinalRankTiePolicy.SPLIT_RANK_POINTS`）
-    を確認する（Issue #75）。`_DEFAULT_RULES`（ウマ30/10/-10/-30・
-    オカ20）はIssue本文の代表例（1位+50, 2位+10, 3位-10, 4位-30）と一致する
-    ため、そのまま`final_rank_tie_policy`だけ差し替えて使う。
-    """
 
     def _rules(self):
         return replace(
@@ -620,7 +626,7 @@ class SplitRankPointsTest(unittest.TestCase):
 
     def test_non_top_tie_group_preserves_a_negative_uma_total(self) -> None:
         """トップ以外の同点グループで、負のウマ合計も総額どおり保存される
-        ことを確認する（Issue #127要件6）。
+        ことを確認する。
         """
         result = calculate_final_scores(
             {
@@ -654,7 +660,7 @@ class SplitRankPointsTest(unittest.TestCase):
     def test_combined_totals_match_the_pre_split_allocation_when_uma_and_oka_remainders_conflict(
         self,
     ) -> None:
-        """Issue #127レビュー指摘・決定B（[AI-DECISION] comment）の回帰
+        """旧python-studyで確定した契約・決定B（[AI-DECISION] comment）の回帰
         テスト。ウマ・オカを別々に按分すると、`uma=(20, 10, -10, -20)`・
         `oka_rank_points=20`の3人トップ同点で両成分の端数が同時に生じ、
         単純な個別按分では各人の合算値が修正前の按分結果から0.1ポイント
