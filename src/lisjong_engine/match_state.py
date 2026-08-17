@@ -36,6 +36,8 @@ from lisjong_engine.settlement import (
 )
 from lisjong_engine.wind import Wind
 
+_SEAT_ORDER = tuple(Seat)
+
 # F2は4人半荘のみを扱う。北場は対局位置として成立しない。
 _SUPPORTED_PREVAILING_WINDS = (Wind.EAST, Wind.SOUTH, Wind.WEST)
 
@@ -505,3 +507,117 @@ def _next_round_position(
         honba=honba,
         riichi_sticks=riichi_sticks,
     )
+
+
+def _first_place_seat(scores: SeatPoints) -> Seat:
+    """東1局開始時の固定席順（東→南→西→北）をtie-breakとした1位席を返す。
+
+    `FinalRankTiePolicy`（最終順位点の分配規則）とは別の、match進行判定
+    専用のtie-break契約であり、`calculate_final_scores()`は呼ばない。
+    """
+    if not isinstance(scores, SeatPoints):
+        raise TypeError("scores must be SeatPoints")
+
+    return max(
+        _SEAT_ORDER,
+        key=lambda seat: (scores[seat], -_SEAT_ORDER.index(seat)),
+    )
+
+
+def _bankrupt_seats(
+    scores: SeatPoints,
+    rules: RuleSet,
+) -> tuple[Seat, ...]:
+    """局精算適用後のraw scoreから、破産済み席を固定席順でpureに抽出する。"""
+    if not isinstance(scores, SeatPoints):
+        raise TypeError("scores must be SeatPoints")
+    if not isinstance(rules, RuleSet):
+        raise TypeError("rules must be a RuleSet")
+
+    if not rules.bankruptcy_enabled:
+        return ()
+
+    return tuple(
+        seat for seat in _SEAT_ORDER if scores[seat] < rules.bankruptcy_threshold
+    )
+
+
+def _match_end_reason(
+    position: RoundPosition,
+    result: RoundResult,
+    scores_after: SeatPoints,
+    dealer_continues: bool,
+    rules: RuleSet,
+) -> MatchEndReason | None:
+    """局精算後のfactから、半荘が終了するかどうかをpureに判定する。
+
+    判定順序は次で固定する。
+
+    1. bankruptcy（局位置に関係なく最優先）
+    2. West4は親継続の有無に関わらず必ず最大局として`FINAL_ROUND`
+    3. South4 / West1〜3でのdealer win・dealer tenpai stop
+    4. dealer流れ時の`TARGET_REACHED`
+    5. South4で親流れかつtarget未達なら、`west_round_enabled`次第で
+       `None`（西入）または`FINAL_ROUND`
+    6. West1〜3で親流れかつtarget未達なら`None`（次のWest handへ進む）
+
+    `return_points`は最終score計算専用の値であり、ここでは一切参照しない。
+    判定に使う基準点は常に`rules.first_place_target_points`である。
+    """
+    if not isinstance(position, RoundPosition):
+        raise TypeError("position must be a RoundPosition")
+    if not isinstance(result, RoundResult):
+        raise TypeError("result must be a RoundResult")
+    if not isinstance(scores_after, SeatPoints):
+        raise TypeError("scores_after must be SeatPoints")
+    if type(dealer_continues) is not bool:
+        raise TypeError("dealer_continues must be a bool")
+    if not isinstance(rules, RuleSet):
+        raise TypeError("rules must be a RuleSet")
+
+    expected_dealer_continues = _dealer_continues(result, position.dealer_seat)
+    if dealer_continues != expected_dealer_continues:
+        raise ValueError(
+            "dealer_continues is inconsistent with result and position.dealer_seat"
+        )
+
+    if _bankrupt_seats(scores_after, rules):
+        return MatchEndReason.BANKRUPTCY
+
+    is_west_four = position.prevailing_wind is Wind.WEST and position.hand_number == 4
+    if is_west_four:
+        return MatchEndReason.FINAL_ROUND
+
+    is_south_four = position.prevailing_wind is Wind.SOUTH and position.hand_number == 4
+    is_west_before_four = (
+        position.prevailing_wind is Wind.WEST and position.hand_number < 4
+    )
+    if not (is_south_four or is_west_before_four):
+        return None
+
+    dealer_seat = position.dealer_seat
+    dealer_is_top = _first_place_seat(scores_after) is dealer_seat
+    dealer_reached_target = scores_after[dealer_seat] >= rules.first_place_target_points
+
+    if dealer_continues and dealer_is_top and dealer_reached_target:
+        if (
+            isinstance(result, WinResult)
+            and rules.dealer_win_end_enabled
+            and any(winner.seat is dealer_seat for winner in result.winners)
+        ):
+            return MatchEndReason.DEALER_WIN
+        if (
+            isinstance(result, ExhaustiveDrawResult)
+            and rules.dealer_tenpai_end_enabled
+            and dealer_seat in result.tenpai_seats
+        ):
+            return MatchEndReason.DEALER_TENPAI
+        return None
+
+    if not dealer_continues:
+        if any(scores_after[seat] >= rules.first_place_target_points for seat in Seat):
+            return MatchEndReason.TARGET_REACHED
+        if is_south_four and not rules.west_round_enabled:
+            return MatchEndReason.FINAL_ROUND
+
+    return None

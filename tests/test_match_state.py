@@ -11,7 +11,10 @@ from lisjong_engine.match_state import (
     MatchPhase,
     MatchState,
     RoundPosition,
+    _bankrupt_seats,
     _dealer_continues,
+    _first_place_seat,
+    _match_end_reason,
     _next_round_position,
 )
 from lisjong_engine.points import SeatPoints
@@ -1270,6 +1273,677 @@ class SettleActiveRoundTest(unittest.TestCase):
         self.assertEqual(match.position, position_before)
         self.assertEqual(match.history, ())
         self.assertEqual(match._started_round_count, 1)
+
+
+_DEALER_SEAT_BY_HAND_NUMBER = {
+    1: Seat.EAST,
+    2: Seat.SOUTH,
+    3: Seat.WEST,
+    4: Seat.NORTH,
+}
+
+
+def _position(
+    prevailing_wind: Wind,
+    hand_number: int,
+    *,
+    honba: int = 0,
+    riichi_sticks: int = 0,
+) -> RoundPosition:
+    return RoundPosition(
+        prevailing_wind=prevailing_wind,
+        hand_number=hand_number,
+        dealer_seat=_DEALER_SEAT_BY_HAND_NUMBER[hand_number],
+        honba=honba,
+        riichi_sticks=riichi_sticks,
+    )
+
+
+class FirstPlaceSeatTest(unittest.TestCase):
+    def test_clear_top(self) -> None:
+        self.assertIs(
+            _first_place_seat(SeatPoints(20_000, 40_000, 20_000, 20_000)),
+            Seat.SOUTH,
+        )
+
+    def test_east_south_tie_favors_east(self) -> None:
+        self.assertIs(
+            _first_place_seat(SeatPoints(30_000, 30_000, 20_000, 20_000)),
+            Seat.EAST,
+        )
+
+    def test_south_west_tie_with_lower_east_favors_south(self) -> None:
+        self.assertIs(
+            _first_place_seat(SeatPoints(10_000, 30_000, 30_000, 20_000)),
+            Seat.SOUTH,
+        )
+
+    def test_four_way_tie_favors_east(self) -> None:
+        self.assertIs(
+            _first_place_seat(SeatPoints(25_000, 25_000, 25_000, 25_000)),
+            Seat.EAST,
+        )
+
+    def test_rejects_invalid_type(self) -> None:
+        with self.assertRaises(TypeError):
+            _first_place_seat("not-seat-points")
+
+
+class BankruptSeatsTest(unittest.TestCase):
+    def test_score_below_threshold_is_bankrupt(self) -> None:
+        rules = RuleSet.default()
+        scores = SeatPoints(-1, 25_000, 25_000, 25_000)
+        self.assertEqual(_bankrupt_seats(scores, rules), (Seat.EAST,))
+
+    def test_score_equal_to_threshold_is_not_bankrupt(self) -> None:
+        rules = RuleSet.default()
+        scores = SeatPoints(0, 25_000, 25_000, 25_000)
+        self.assertEqual(_bankrupt_seats(scores, rules), ())
+
+    def test_positive_score_is_not_bankrupt(self) -> None:
+        rules = RuleSet.default()
+        scores = SeatPoints(25_000, 25_000, 25_000, 25_000)
+        self.assertEqual(_bankrupt_seats(scores, rules), ())
+
+    def test_bankruptcy_disabled_returns_empty(self) -> None:
+        rules = replace(RuleSet.default(), bankruptcy_enabled=False)
+        scores = SeatPoints(-1, -1, -1, -1)
+        self.assertEqual(_bankrupt_seats(scores, rules), ())
+
+    def test_multiple_bankrupt_seats_are_returned_in_fixed_seat_order(self) -> None:
+        rules = RuleSet.default()
+        scores = SeatPoints(-1, 25_000, -1, 25_000)
+        self.assertEqual(_bankrupt_seats(scores, rules), (Seat.EAST, Seat.WEST))
+
+    def test_rejects_invalid_scores_type(self) -> None:
+        with self.assertRaises(TypeError):
+            _bankrupt_seats("not-seat-points", RuleSet.default())
+
+    def test_rejects_invalid_rules_type(self) -> None:
+        with self.assertRaises(TypeError):
+            _bankrupt_seats(SeatPoints(0, 0, 0, 0), "not-rules")
+
+
+class MatchEndReasonBankruptcyTest(unittest.TestCase):
+    def test_east_one_bankruptcy_ends_the_match(self) -> None:
+        position = _position(Wind.EAST, 1)
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.EAST,
+        )
+        scores_after = SeatPoints(-1, 25_000, 25_000, 25_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.BANKRUPTCY,
+        )
+
+    def test_west_four_bankruptcy_takes_priority_over_final_round(self) -> None:
+        position = _position(Wind.WEST, 4)
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        scores_after = SeatPoints(-1, 25_000, 25_000, 25_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.BANKRUPTCY,
+        )
+
+
+class MatchEndReasonEarlyStageTest(unittest.TestCase):
+    def test_east_four_dealer_win_top_and_target_reached_does_not_end(self) -> None:
+        position = _position(Wind.EAST, 4)
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+    def test_south_three_never_ends_without_bankruptcy(self) -> None:
+        position = _position(Wind.SOUTH, 3)
+        result = _win_result(
+            (Seat.WEST,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.WEST,
+        )
+        scores_after = SeatPoints(10_000, 10_000, 60_000, 10_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+
+class MatchEndReasonSouthFourDealerStopTest(unittest.TestCase):
+    def _south_four_win(self) -> WinResult:
+        return _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+
+    def _south_four_draw(self) -> ExhaustiveDrawResult:
+        return ExhaustiveDrawResult(tenpai_seats=(Seat.NORTH,))
+
+    def test_dealer_win_top_and_target_reached_ends_the_match(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                self._south_four_win(),
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.DEALER_WIN,
+        )
+
+    def test_dealer_top_but_target_not_reached_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 25_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                self._south_four_win(),
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+    def test_dealer_target_reached_but_not_top_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(35_000, 20_000, 15_000, 30_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                self._south_four_win(),
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+    def test_dealer_win_end_disabled_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+        rules = replace(RuleSet.default(), dealer_win_end_enabled=False)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                self._south_four_win(),
+                scores_after,
+                True,
+                rules,
+            )
+        )
+
+    def test_dealer_tenpai_top_and_target_reached_ends_the_match(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                self._south_four_draw(),
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.DEALER_TENPAI,
+        )
+
+    def test_dealer_tenpai_target_not_reached_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 25_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                self._south_four_draw(),
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+    def test_dealer_tenpai_not_top_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(35_000, 20_000, 15_000, 30_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                self._south_four_draw(),
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+    def test_dealer_tenpai_end_disabled_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+        rules = replace(RuleSet.default(), dealer_tenpai_end_enabled=False)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                self._south_four_draw(),
+                scores_after,
+                True,
+                rules,
+            )
+        )
+
+
+class MatchEndReasonTieBreakTest(unittest.TestCase):
+    def test_west_one_dealer_east_wins_tie_break_and_ends(self) -> None:
+        position = _position(Wind.WEST, 1)
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.EAST,
+        )
+        scores_after = SeatPoints(30_000, 30_000, 20_000, 20_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.DEALER_WIN,
+        )
+
+    def test_west_two_dealer_south_loses_tie_break_and_continues(self) -> None:
+        position = _position(Wind.WEST, 2)
+        result = _win_result(
+            (Seat.SOUTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.SOUTH,
+        )
+        scores_after = SeatPoints(30_000, 30_000, 20_000, 20_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+
+class MatchEndReasonSouthFourDealerFlowTest(unittest.TestCase):
+    def _south_four_child_win(self) -> WinResult:
+        return _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+        )
+
+    def test_target_reached_ends_with_target_reached(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(35_000, 20_000, 20_000, 25_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                self._south_four_child_win(),
+                scores_after,
+                False,
+                RuleSet.default(),
+            ),
+            MatchEndReason.TARGET_REACHED,
+        )
+
+    def test_target_not_reached_with_west_round_enabled_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(25_000, 25_000, 25_000, 25_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                self._south_four_child_win(),
+                scores_after,
+                False,
+                RuleSet.default(),
+            )
+        )
+
+    def test_target_not_reached_with_west_round_disabled_ends(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        scores_after = SeatPoints(25_000, 25_000, 25_000, 25_000)
+        rules = replace(RuleSet.default(), west_round_enabled=False)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                self._south_four_child_win(),
+                scores_after,
+                False,
+                rules,
+            ),
+            MatchEndReason.FINAL_ROUND,
+        )
+
+
+class MatchEndReasonWestOneThroughThreeTest(unittest.TestCase):
+    def test_dealer_flow_target_reached_ends_with_target_reached(self) -> None:
+        position = _position(Wind.WEST, 2)
+        result = _win_result(
+            (Seat.WEST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.SOUTH,
+            source_seat=Seat.SOUTH,
+        )
+        scores_after = SeatPoints(20_000, 20_000, 35_000, 25_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                False,
+                RuleSet.default(),
+            ),
+            MatchEndReason.TARGET_REACHED,
+        )
+
+    def test_dealer_flow_target_not_reached_continues(self) -> None:
+        position = _position(Wind.WEST, 2)
+        result = _win_result(
+            (Seat.WEST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.SOUTH,
+            source_seat=Seat.SOUTH,
+        )
+        scores_after = SeatPoints(25_000, 25_000, 25_000, 25_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                False,
+                RuleSet.default(),
+            )
+        )
+
+    def test_dealer_stop_ends_west_one(self) -> None:
+        position = _position(Wind.WEST, 1)
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.EAST,
+        )
+        scores_after = SeatPoints(35_000, 20_000, 20_000, 25_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.DEALER_WIN,
+        )
+
+
+class MatchEndReasonWestFourTest(unittest.TestCase):
+    def test_dealer_win_stop_conditions_still_yield_final_round(self) -> None:
+        position = _position(Wind.WEST, 4)
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.FINAL_ROUND,
+        )
+
+    def test_dealer_tenpai_stop_conditions_still_yield_final_round(self) -> None:
+        position = _position(Wind.WEST, 4)
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.NORTH,))
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.FINAL_ROUND,
+        )
+
+    def test_dealer_flow_yields_final_round(self) -> None:
+        position = _position(Wind.WEST, 4)
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+        )
+        scores_after = SeatPoints(25_000, 25_000, 25_000, 25_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                False,
+                RuleSet.default(),
+            ),
+            MatchEndReason.FINAL_ROUND,
+        )
+
+    def test_abortive_draw_dealer_continuation_yields_final_round(self) -> None:
+        position = _position(Wind.WEST, 4)
+        result = AbortiveDrawResult(AbortiveDrawReason.FOUR_KANS)
+        scores_after = SeatPoints(25_000, 25_000, 25_000, 25_000)
+
+        self.assertIs(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            ),
+            MatchEndReason.FINAL_ROUND,
+        )
+
+
+class MatchEndReasonAbortiveDrawTest(unittest.TestCase):
+    def test_south_four_abortive_draw_does_not_end(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        result = AbortiveDrawResult(AbortiveDrawReason.FOUR_KANS)
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 35_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+    def test_west_two_abortive_draw_does_not_end(self) -> None:
+        position = _position(Wind.WEST, 2)
+        result = AbortiveDrawResult(AbortiveDrawReason.FOUR_KANS)
+        scores_after = SeatPoints(20_000, 35_000, 20_000, 20_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+
+class MatchEndReasonDealerContinuesConsistencyTest(unittest.TestCase):
+    def test_rejects_inconsistent_dealer_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+        )
+        scores_after = SeatPoints(25_000, 25_000, 25_000, 25_000)
+
+        with self.assertRaises(ValueError):
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+
+    def test_accepts_consistent_dealer_continues(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        scores_after = SeatPoints(20_000, 20_000, 20_000, 25_000)
+
+        self.assertIsNone(
+            _match_end_reason(
+                position,
+                result,
+                scores_after,
+                True,
+                RuleSet.default(),
+            )
+        )
+
+
+class MatchEndReasonReturnPointsIndependenceTest(unittest.TestCase):
+    def test_return_points_does_not_affect_the_decision(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+        )
+        scores_after = SeatPoints(35_000, 20_000, 20_000, 25_000)
+
+        rules_a = RuleSet.default()
+        rules_b = replace(rules_a, return_points=35_000)
+        self.assertNotEqual(rules_a.return_points, rules_b.return_points)
+
+        self.assertEqual(
+            _match_end_reason(position, result, scores_after, False, rules_a),
+            _match_end_reason(position, result, scores_after, False, rules_b),
+        )
+        self.assertIs(
+            _match_end_reason(position, result, scores_after, False, rules_b),
+            MatchEndReason.TARGET_REACHED,
+        )
+
+
+class MatchEndReasonValidationTest(unittest.TestCase):
+    def _valid_arguments(self):
+        position = _position(Wind.EAST, 1)
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST,))
+        scores_after = SeatPoints(25_000, 25_000, 25_000, 25_000)
+        return position, result, scores_after, True, RuleSet.default()
+
+    def test_rejects_invalid_position(self) -> None:
+        _, result, scores_after, dealer_continues, rules = self._valid_arguments()
+        with self.assertRaises(TypeError):
+            _match_end_reason(
+                "not-a-position", result, scores_after, dealer_continues, rules
+            )
+
+    def test_rejects_invalid_result(self) -> None:
+        position, _, scores_after, dealer_continues, rules = self._valid_arguments()
+        with self.assertRaises(TypeError):
+            _match_end_reason(
+                position, "not-a-result", scores_after, dealer_continues, rules
+            )
+
+    def test_rejects_invalid_scores_after(self) -> None:
+        position, result, _, dealer_continues, rules = self._valid_arguments()
+        with self.assertRaises(TypeError):
+            _match_end_reason(
+                position, result, "not-seat-points", dealer_continues, rules
+            )
+
+    def test_rejects_non_bool_dealer_continues(self) -> None:
+        position, result, scores_after, _, rules = self._valid_arguments()
+        with self.assertRaises(TypeError):
+            _match_end_reason(position, result, scores_after, 1, rules)
+
+    def test_rejects_invalid_rules(self) -> None:
+        position, result, scores_after, dealer_continues, _ = self._valid_arguments()
+        with self.assertRaises(TypeError):
+            _match_end_reason(
+                position, result, scores_after, dealer_continues, "not-rules"
+            )
 
 
 if __name__ == "__main__":
