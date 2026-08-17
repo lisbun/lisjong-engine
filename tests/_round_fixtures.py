@@ -174,6 +174,7 @@ def build_wall(
     dealer_seat: Seat = Seat.EAST,
     with_dead_wall: bool = False,
     dead_wall: tuple[str, ...] = (),
+    live_wall_size: int = LIVE_WALL_SIZE,
 ) -> Wall:
     """指定した配牌とツモ順になる山を組み立てる。
 
@@ -185,7 +186,9 @@ def build_wall(
     drawn_tiles = take(pool, draws)
     hand_tiles = {seat: take(pool, names) for seat, names in hands.items()}
 
-    wall_tiles: list[Tile | None] = [None] * LIVE_WALL_SIZE
+    if live_wall_size < FIRST_DRAW_POSITION + len(drawn_tiles):
+        raise ValueError("draws must fit after the initial deal")
+    wall_tiles: list[Tile | None] = [None] * live_wall_size
     for seat, positions in deal_positions(dealer_seat).items():
         for position, tile in zip(positions, hand_tiles[seat], strict=True):
             wall_tiles[position] = tile
@@ -275,6 +278,7 @@ def capture(state: RoundState) -> tuple:
         tuple(state.furiten_reasons(seat) for seat in Seat),
         tuple(state.suukantsu_pao_seat(seat) for seat in Seat),
         state.events,
+        state.result,
     )
 
 

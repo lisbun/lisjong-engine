@@ -230,11 +230,81 @@ Issue #17（E2）は、Ronの合法性・reaction priority・成立者とprovena
 reaction resolution
     -> AWAITING_WIN_FINALIZATION
     -> PendingRonResolution
-    -> E3: scoring / settlement / RoundResult
+    -> E3: scoring / RoundResult
 ```
 
 E2では点数確定や`RoundResult`構築を先取りしない。同じreaction windowの二重解決はphaseと
 pending factのinvariantで拒否する。
+
+### RoundResultとterminal event
+
+E3の局終了値は`round_result` moduleのimmutable contractとして定義する。
+`RoundResult`は`WinResult | ExhaustiveDrawResult | AbortiveDrawResult`であり、流し満貫は
+独立variantにせず`ExhaustiveDrawResult.nagashi_mangan_seats`へ保持する。
+
+`WinningPlayerResult`は席、`WinningContext`、選択済みの`WinningScoreSelection`だけを保持する。
+役・符等は`WinningScoreSelection`が参照する`HandValueEvaluation`に既に含まれるため、
+terminal resultへ重複して保持しない。`WinResult.dora_indicators`は各和了の得点評価で有効だった
+表示牌snapshotであり、その構築規則やWallのmutationは本value objectの責務ではない。
+
+局終了eventは結果種別ごとに分けず、`RoundEndedEvent(result)`の1種類とする。本場、供託、
+実際の点数mutation、複数Ronの支払配分、match進行はこのcontractへ含めない。これらの型は
+責務moduleから直接importし、package top-levelへ一括re-exportしない。
+
+### 和了finalization境界
+
+和了評価のpure境界は、winner単位のimmutableな`WinningClaim`と、Wallからコピーした
+`DoraIndicatorState`を入力とする。どちらもmutableな`RoundState`、`PlayerState`、`Wall`を
+保持しない。`winning_finalization` moduleが、このfactから`WinningContext`、claim時点で有効な
+`DoraIndicators`、`WinningScoreSelection`、`WinResult`を構築する。
+
+ツモ合法手の導出は候補列挙をnon-throwing probeとして利用し、得点候補が無い場合は
+`TsumoLegalAction`を提示しない。action適用時とRon確定時は`evaluate_winning_scores()`で
+strictに再評価する。Ron牌は評価用の`WinningContext.concealed_tiles`へだけ追加し、
+winnerの`PlayerState`へは追加しない。
+
+Ronは`AWAITING_WIN_FINALIZATION`の`PendingRonResolution`を
+`finalize_pending_win(expected_revision=...)`で消費する。通常winnerはE2の
+`ron_awarded_seats`をそのまま使用し、reaction priorityを再計算しない。三家和判定だけは、
+3席が実際にRonを選んだ`ron_selected_seats`と`RuleSet.triple_ron_abortive_draw`を使う。
+
+indicatorは通常表示牌を`visible`、公開済み槓表示牌を`kan`へ分離し、それぞれ対応する
+`ura` / `kan_ura`も同じ位置から構築する。未公開の遅延大明槓表示牌は、その宣言席自身の
+RINSHAN claimにだけscoring上追加する。直後の打牌Ronには追加せず、いずれの場合も
+scoring snapshotのためにWallを公開・mutationしない。
+
+和了terminal commitはworking copy上でresult、単一の`RoundEndedEvent`、pending cleanup、
+`FINISHED`をまとめて構築する。`FINISHED`ではresultとterminal eventが一意に一致し、eventは
+logの最後で、進行中factとpending槓ドラは残らない。非`FINISHED`ではresultもterminal eventも
+存在しない。
+
+### 流局判定境界
+
+九種九牌・四風連打・四槓散了・四家立直・荒牌流局・流し満貫の成立可否は`draw_resolution`
+moduleへ分離する。`RoundState` / `PlayerState` / `Wall`のmutable objectは受け取らず、
+`WinningClaim` / `DoraIndicatorState`と同様に、席別のimmutableな最小factだけを入力とする。
+
+`NineTerminalsLegalAction`は他のturn actionと同じpull契約に従う。callerが選択したときだけ
+`AbortiveDrawResult(NINE_TERMINALS)`へ終局し、engineが自動的に選ぶことはない。合法手probe
+とapply時のstrict revalidationは同じ`derive_nine_terminals_eligibility()`を共有し、判定logicを
+二重実装しない。
+
+自動判定される途中流局・荒牌流局は、それぞれ次の時点でだけ判定する。
+
+```text
+四風連打・四家立直   最後の打牌のreaction windowがRon・鳴きなしで解決した後
+四槓散了             槓が実際に確定した直後（槍槓で流れた未成立の槓は数えない）
+荒牌流局             最後の打牌のreaction windowがRonなしで解決した後
+```
+
+`_finish_discard_without_ron()`が、reaction不要のfast pathとexplicit all-pass pathの両方から
+呼ばれる共通の後処理として、この判定を一箇所へ集約する。live wallが尽きた瞬間には終局せず、
+海底ツモ・最終打牌・河底ロンの機会を必ず経てから荒牌流局を確定する。
+
+荒牌流局のtenpaiは、向聴数・受け入れ枚数等の牌効率judgementではなく、既存の和了形解析
+（`find_winning_tile_types` / `PlayerState.winning_tile_types`）が返す待ちの有無で判定する
+semantic tenpaiであり、役の有無では判定しない。流し満貫は独立したterminal causeにせず、
+`ExhaustiveDrawResult.nagashi_mangan_seats`として扱う。
 
 ## Determinism
 

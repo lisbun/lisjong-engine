@@ -16,8 +16,8 @@ derive_kakan_reaction_actions    パス・ロン（槍槓）
 derive_ankan_reaction_actions    パス・ロン（国士無双限定の槍槓）
 ```
 
-ツモ和了と九種九牌はE3の責務であり、本moduleでは生成しない。生成しない
-actionは`RoundState.apply()`でillegalとして拒否される。
+ツモ和了・九種九牌はどちらもshared winning finalization / draw resolutionへ
+immutable factを渡してprobeする。
 """
 
 from collections.abc import Mapping
@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from itertools import combinations
 
 from lisjong_engine.discard import Discard
+from lisjong_engine.draw_resolution import nine_terminals_eligible
 from lisjong_engine.kan import (
     PendingAnkan,
     PendingKakan,
@@ -39,10 +40,12 @@ from lisjong_engine.legal_action import (
     DiscardLegalAction,
     KakanLegalAction,
     LegalAction,
+    NineTerminalsLegalAction,
     PassLegalAction,
     PonLegalAction,
     ReactionOrigin,
     RonLegalAction,
+    TsumoLegalAction,
 )
 from lisjong_engine.meld import Chi, Daiminkan, Pon
 from lisjong_engine.player_state import PlayerState
@@ -53,9 +56,14 @@ from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.rules import RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import Tile, TileType
-from lisjong_engine.win_context import WinOrigin
+from lisjong_engine.win_context import WinMethod, WinOrigin
 from lisjong_engine.wind import Wind
 from lisjong_engine.winning import find_winning_tile_types
+from lisjong_engine.winning_finalization import (
+    DoraIndicatorState,
+    WinningClaim,
+    has_winning_score,
+)
 
 _SUITED_RANK_RANGE = range(1, 10)
 
@@ -78,11 +86,17 @@ class RoundView:
     remaining_count: int
     can_draw_rinshan: bool
     drawn_tile_id: int | None = None
+    drawn_tile_source: DrawSource | None = None
     pending_discarder: Seat | None = None
     pending_discard: Discard | None = None
     pending_discard_source: DrawSource | None = None
     pending_kakan: PendingKakan | None = None
     pending_ankan: PendingAnkan | None = None
+    dora_indicator_tiles: tuple[Tile, ...] = ()
+    ura_dora_indicator_tiles: tuple[Tile, ...] = ()
+    revealed_dora_indicator_count: int = 0
+    pending_kan_dora_reveals: tuple[Seat, ...] = ()
+    suukantsu_pao_seats: Mapping[Seat, Seat] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.phase, RoundPhase):
@@ -95,6 +109,10 @@ class RoundView:
             raise TypeError("players must contain only PlayerState instances")
         if not isinstance(self.rules, RuleSet):
             raise TypeError("rules must be a RuleSet")
+        if self.drawn_tile_source is not None and not isinstance(
+            self.drawn_tile_source, DrawSource
+        ):
+            raise TypeError("drawn_tile_source must be a DrawSource or None")
 
 
 def derive_legal_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]:
@@ -121,7 +139,7 @@ def derive_legal_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]
 
 
 def derive_turn_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]:
-    """打牌・立直宣言打牌・暗槓・加槓を、この順序で列挙する。"""
+    """打牌・立直宣言打牌・暗槓・加槓・ツモ・九種九牌を、この順序で列挙する。"""
     player = view.players[seat]
     hand_tiles = _sorted_hand(player)
     actions: list[LegalAction] = [
@@ -135,7 +153,91 @@ def derive_turn_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]:
     if view.drawn_tile_id is not None and view.can_draw_rinshan:
         actions.extend(_derive_ankan_actions(view, seat, hand_tiles))
         actions.extend(_derive_kakan_actions(player, hand_tiles))
+    claim = derive_tsumo_claim(view, seat)
+    if claim is not None and has_winning_score(
+        claim,
+        dora_indicator_state(view),
+        view.rules,
+    ):
+        actions.append(TsumoLegalAction())
+    if derive_nine_terminals_eligibility(view, seat):
+        actions.append(NineTerminalsLegalAction())
     return tuple(actions)
+
+
+def _is_global_first_uninterrupted_turn(view: RoundView, seat: Seat) -> bool:
+    """`seat`自身がまだ打牌しておらず、局全体でも鳴きが起きていないかを返す。
+
+    天和・地和相当のツモcontextと九種九牌の第一巡条件が共有する事実。
+    """
+    player = view.players[seat]
+    return not player.has_discarded and not any(
+        other.melds for other in view.players.values()
+    )
+
+
+def derive_tsumo_claim(view: RoundView, seat: Seat) -> WinningClaim | None:
+    """current drawから、ツモprobe/finalizationで共有するclaimを構築する。"""
+    if view.drawn_tile_id is None or view.drawn_tile_source is None:
+        return None
+    player = view.players[seat]
+    winning_tile = next(
+        (tile for tile in player.hand_tiles if tile.id == view.drawn_tile_id),
+        None,
+    )
+    if winning_tile is None:
+        return None
+    origin = (
+        WinOrigin.RINSHAN
+        if view.drawn_tile_source is DrawSource.RINSHAN
+        else WinOrigin.LIVE_WALL
+    )
+    pao_seats = view.suukantsu_pao_seats or {}
+    return WinningClaim(
+        seat=seat,
+        concealed_tiles=player.hand_tiles,
+        winning_tile=winning_tile,
+        method=WinMethod.TSUMO,
+        origin=origin,
+        seat_wind=view.seat_winds[seat],
+        prevailing_wind=view.prevailing_wind,
+        declared_melds=player.melds,
+        riichi_status=player.riichi_status,
+        is_ippatsu=player.is_ippatsu,
+        is_last_tile=(
+            view.drawn_tile_source is DrawSource.LIVE_WALL and view.remaining_count == 0
+        ),
+        is_first_uninterrupted_turn=(
+            origin is WinOrigin.LIVE_WALL
+            and _is_global_first_uninterrupted_turn(view, seat)
+        ),
+        suukantsu_pao_seat=pao_seats.get(seat),
+    )
+
+
+def derive_nine_terminals_eligibility(view: RoundView, seat: Seat) -> bool:
+    """`seat`が今、九種九牌を宣言できるかを返す。
+
+    生成側（合法手probe）とapply側（strict revalidation）の両方が本関数を
+    通ることで、判定logicを二重実装しない。
+    """
+    if not view.rules.nine_terminals_abortive_draw_enabled:
+        return False
+    if view.drawn_tile_id is None or view.drawn_tile_source is not DrawSource.LIVE_WALL:
+        return False
+    if not _is_global_first_uninterrupted_turn(view, seat):
+        return False
+    return nine_terminals_eligible(view.players[seat].hand_tiles)
+
+
+def dora_indicator_state(view: RoundView) -> DoraIndicatorState:
+    """RoundViewのWall由来factをimmutableなpure-helper入力へ変換する。"""
+    return DoraIndicatorState(
+        dora_indicator_tiles=view.dora_indicator_tiles,
+        ura_dora_indicator_tiles=view.ura_dora_indicator_tiles,
+        revealed_dora_indicator_count=view.revealed_dora_indicator_count,
+        pending_kan_dora_reveal_seats=view.pending_kan_dora_reveals,
+    )
 
 
 def derive_discardable_tiles(view: RoundView, seat: Seat) -> tuple[Tile, ...]:

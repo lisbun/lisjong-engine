@@ -1,8 +1,9 @@
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 
 from lisjong_engine.round_event import (
     DrawSource,
+    RoundEndedEvent,
     RoundEvent,
     RoundEventSnapshot,
     RoundStartedEvent,
@@ -10,6 +11,7 @@ from lisjong_engine.round_event import (
     TileDrawnEvent,
     TilesDealtEvent,
 )
+from lisjong_engine.round_result import AbortiveDrawReason, AbortiveDrawResult
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import STANDARD_TILES
 from lisjong_engine.wind import Wind
@@ -64,6 +66,21 @@ class RoundEventValueTest(unittest.TestCase):
             with self.subTest(factory=factory):
                 with self.assertRaises(TypeError):
                     factory()
+
+    def test_round_ended_event_carries_exactly_one_terminal_result(self) -> None:
+        result = AbortiveDrawResult(AbortiveDrawReason.FOUR_WINDS)
+        event = RoundEndedEvent(result)
+
+        self.assertIs(event.result, result)
+        self.assertIsInstance(event, RoundEvent)
+        self.assertEqual(tuple(field.name for field in fields(event)), ("result",))
+        self.assertEqual(tuple(RoundEventSnapshot((event,))), (event,))
+        with self.assertRaises(FrozenInstanceError):
+            event.result = AbortiveDrawResult(AbortiveDrawReason.FOUR_KANS)
+
+    def test_round_ended_event_rejects_non_result(self) -> None:
+        with self.assertRaisesRegex(TypeError, "RoundResult"):
+            RoundEndedEvent("finished")
 
 
 class RoundEventSnapshotTest(unittest.TestCase):

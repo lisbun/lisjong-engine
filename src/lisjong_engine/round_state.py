@@ -45,9 +45,15 @@ validationまたは遷移が失敗した場合、本体へpartial mutationを残
 ## E2とE3の境界
 
 反応としてのロンは、合法判定・選択・優先順位解決までを本moduleが行う。
-成立者が確定した局面は`AWAITING_WIN_FINALIZATION`へ進み、点数確定・
-`RoundResult`構築・終局commitはE3が担当する。荒牌流局・途中流局の確定も
-E3の責務であり、本moduleは暫定fallbackを作らない。
+成立者が確定した局面は`AWAITING_WIN_FINALIZATION`へ進み、明示的な
+`finalize_pending_win()`がscoringと終局commitを行う。ツモも合法手として
+strictに再評価してから同じterminal commitを使う。
+
+九種九牌はplayerが選択したときだけ`AbortiveDrawResult`へ終局するturn
+actionとして扱う。四風連打・四家立直・四槓散了・荒牌流局は、成立timing
+（reaction windowの解決後、または槓の実際の確定直後）でだけ自動判定し、
+`draw_resolution`のpure判定関数へ委譲する。判定logicそのものは本module
+へ複製しない。
 """
 
 from collections.abc import Mapping
@@ -55,6 +61,11 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from lisjong_engine.discard import Discard
+from lisjong_engine.draw_resolution import (
+    build_exhaustive_draw_result,
+    first_discard_abortive_draw,
+    four_kans_abortive_draw,
+)
 from lisjong_engine.furiten import FuritenReason
 from lisjong_engine.kan import PendingAnkan, PendingKakan, count_quads
 from lisjong_engine.legal_action import (
@@ -64,10 +75,18 @@ from lisjong_engine.legal_action import (
     KakanLegalAction,
     LegalAction,
     LegalActionSnapshot,
+    NineTerminalsLegalAction,
     ReactionOrigin,
+    TsumoLegalAction,
     is_legal_action,
 )
-from lisjong_engine.legal_actions import RoundView, derive_legal_actions
+from lisjong_engine.legal_actions import (
+    RoundView,
+    derive_legal_actions,
+    derive_nine_terminals_eligibility,
+    derive_tsumo_claim,
+    dora_indicator_state,
+)
 from lisjong_engine.meld import Ankan, Kakan, Meld
 from lisjong_engine.player_state import PlayerState
 from lisjong_engine.reaction import (
@@ -94,6 +113,7 @@ from lisjong_engine.round_event import (
     ReactionsResolvedEvent,
     RiichiDeclaredEvent,
     RiichiFinalizedEvent,
+    RoundEndedEvent,
     RoundEventSnapshot,
     RoundStartedEvent,
     TileDiscardedEvent,
@@ -101,12 +121,18 @@ from lisjong_engine.round_event import (
     TilesDealtEvent,
 )
 from lisjong_engine.round_phase import RoundPhase
+from lisjong_engine.round_result import (
+    AbortiveDrawReason,
+    AbortiveDrawResult,
+    RoundResult,
+)
 from lisjong_engine.rules import KanDoraRevealPolicy, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import Tile
 from lisjong_engine.wall import Wall
-from lisjong_engine.win_context import RiichiStatus
+from lisjong_engine.win_context import RiichiStatus, WinMethod, WinOrigin
 from lisjong_engine.wind import Wind
+from lisjong_engine.winning_finalization import WinningClaim, build_win_result
 from lisjong_engine.yaku import Yaku
 
 _SEAT_ORDER = tuple(Seat)
@@ -139,7 +165,13 @@ _REACTION_PHASES = (
     RoundPhase.AWAITING_ANKAN_REACTIONS,
 )
 
-_TURN_ACTION_TYPES = (DiscardLegalAction, AnkanLegalAction, KakanLegalAction)
+_TURN_ACTION_TYPES = (
+    DiscardLegalAction,
+    AnkanLegalAction,
+    KakanLegalAction,
+    TsumoLegalAction,
+    NineTerminalsLegalAction,
+)
 
 
 class RoundStateError(Exception):
@@ -228,6 +260,7 @@ class _Transition:
     riichi_finalizations: tuple[RiichiDeclarationFinalization, ...]
     suukantsu_pao_seats: dict[Seat, Seat]
     events: RoundEventSnapshot
+    result: RoundResult | None
 
 
 class RoundState:
@@ -270,6 +303,7 @@ class RoundState:
         self._riichi_finalizations: tuple[RiichiDeclarationFinalization, ...] = ()
         self._suukantsu_pao_seats: dict[Seat, Seat] = {}
         self._events = RoundEventSnapshot()
+        self._result: RoundResult | None = None
         self._revision = 0
         # 保存則checkの基準。局中に物理牌が増減しないことを直接確認する。
         self._tile_ids = frozenset(
@@ -469,6 +503,10 @@ class RoundState:
     def events(self) -> RoundEventSnapshot:
         return self._events
 
+    @property
+    def result(self) -> RoundResult | None:
+        return self._result
+
     def seat_wind(self, seat: Seat) -> Wind:
         self._validate_seat(seat)
         seat_offset = (
@@ -628,8 +666,10 @@ class RoundState:
                 "through resolve_reactions()"
             )
         if not isinstance(action, _TURN_ACTION_TYPES):
-            # E3のaction型はvalueとして存在するが、E2の状態機械は遷移を
-            # 持たない。暗黙のpassやfallbackを作らず拒否する。
+            # `LegalAction`の全variantは反応actionかturn actionのいずれかで
+            # あり、現状は両方とも遷移を持つ。将来unionへ新しいvariantが
+            # 追加された場合に、暗黙のpassやfallbackを作らずfail closedで
+            # 拒否するための防御的な分岐として維持する。
             raise IllegalActionError(
                 f"{type(action).__name__} is not supported by this round state"
             )
@@ -642,8 +682,12 @@ class RoundState:
             self._apply_discard(seat, action)
         elif isinstance(action, AnkanLegalAction):
             self._apply_ankan(seat, action)
-        else:
+        elif isinstance(action, KakanLegalAction):
             self._apply_kakan(seat, action)
+        elif isinstance(action, TsumoLegalAction):
+            self._apply_tsumo(seat)
+        else:
+            self._apply_nine_terminals(seat)
 
     def resolve_reactions(
         self,
@@ -700,6 +744,44 @@ class RoundState:
         self._apply_resolution(transition, resolution, target_tile)
         self._commit(transition)
         return resolution
+
+    def finalize_pending_win(self, *, expected_revision: int) -> RoundResult:
+        """E2で確定したRon resolutionをstrictに採点して局を終了する。"""
+        if type(expected_revision) is not int:
+            raise TypeError("expected_revision must be an int")
+        self._validate_revision(expected_revision)
+        if self._phase is not RoundPhase.AWAITING_WIN_FINALIZATION:
+            raise IllegalOperationError(
+                "win finalization is only allowed while awaiting it"
+            )
+        if self._pending_ron_resolution is None:
+            raise RoundInvariantError("the pending ron resolution is missing")
+
+        transition = self._begin()
+        pending = transition.pending_ron_resolution
+        if pending is None:
+            raise RoundInvariantError("the pending ron resolution is missing")
+
+        if (
+            self._rules.triple_ron_abortive_draw
+            and len(pending.resolution.ron_selected_seats) == 3
+        ):
+            result: RoundResult = AbortiveDrawResult(AbortiveDrawReason.TRIPLE_RON)
+        else:
+            claims = tuple(
+                self._ron_claim(transition, pending, seat)
+                for seat in pending.resolution.ron_awarded_seats
+            )
+            result = build_win_result(
+                claims,
+                dora_indicator_state(self._transition_view(transition)),
+                self._rules,
+                source_seat=pending.source_seat,
+            )
+
+        self._finish_round(transition, result)
+        self._commit(transition)
+        return result
 
     def _validate_reaction_choices(
         self,
@@ -771,6 +853,36 @@ class RoundState:
         self._commit(transition)
         return tile
 
+    def _apply_tsumo(self, seat: Seat) -> None:
+        """ツモactionをstrictに再評価し、成功時だけterminal commitする。"""
+        transition = self._begin()
+        view = self._transition_view(transition)
+        claim = derive_tsumo_claim(view, seat)
+        if claim is None:
+            raise RoundInvariantError("a tsumo action requires a current drawn tile")
+        result = build_win_result(
+            (claim,),
+            dora_indicator_state(view),
+            self._rules,
+        )
+        self._finish_round(transition, result)
+        self._commit(transition)
+
+    def _apply_nine_terminals(self, seat: Seat) -> None:
+        """九種九牌をstrictに再評価し、成功時だけterminal commitする。
+
+        callerの選択であり、engineが自動的に流局を選ぶことはない。
+        """
+        transition = self._begin()
+        view = self._transition_view(transition)
+        if not derive_nine_terminals_eligibility(view, seat):
+            raise RoundInvariantError(
+                "nine terminals abortive draw is no longer eligible"
+            )
+        result = AbortiveDrawResult(AbortiveDrawReason.NINE_TERMINALS)
+        self._finish_round(transition, result)
+        self._commit(transition)
+
     def _apply_discard(self, seat: Seat, action: DiscardLegalAction) -> None:
         transition = self._begin()
         player = transition.players[seat]
@@ -823,8 +935,7 @@ class RoundState:
             # 結果まで進める。
             self._release_pending_kan_dora(transition)
             self._finalize_riichi(transition, ReactionType.PASS)
-            transition.phase = RoundPhase.AWAITING_DRAW
-            transition.current_seat = seat.next()
+            self._finish_discard_without_ron(transition, discarder=seat)
 
         self._commit(transition)
 
@@ -886,8 +997,6 @@ class RoundState:
             self._release_pending_kan_dora(transition)
             if resolution.is_call:
                 self._apply_call(transition, resolution)
-            else:
-                self._advance_after_pass(transition, resolution)
         elif resolution.origin is ReactionOrigin.KAKAN:
             pending = transition.pending_kakan
             if pending is None:
@@ -903,6 +1012,12 @@ class RoundState:
 
         if resolution.origin is ReactionOrigin.DISCARD:
             self._finalize_riichi(transition, resolution.resolved_type)
+            if not resolution.is_ron and not resolution.is_call:
+                # 反応windowが荒牌流局・四風連打・四家立直それぞれの成立
+                # timingを兼ねる。立直成立の確定より後でなければならない。
+                self._finish_discard_without_ron(
+                    transition, discarder=resolution.source_seat
+                )
 
     def _apply_ron(
         self,
@@ -935,6 +1050,57 @@ class RoundState:
         transition.pending_discard_source = None
         transition.pending_kakan = None
         transition.pending_ankan = None
+
+    def _ron_claim(
+        self,
+        transition: _Transition,
+        pending: PendingRonResolution,
+        seat: Seat,
+    ) -> WinningClaim:
+        """E2のawarded seatとpending provenanceからRon claimを構築する。"""
+        origins = {
+            ReactionOrigin.DISCARD: WinOrigin.DISCARD,
+            ReactionOrigin.KAKAN: WinOrigin.KAKAN,
+            ReactionOrigin.ANKAN: WinOrigin.ANKAN,
+        }
+        player = transition.players[seat]
+        return WinningClaim(
+            seat=seat,
+            concealed_tiles=player.hand_tiles,
+            winning_tile=pending.target_tile,
+            method=WinMethod.RON,
+            origin=origins[pending.origin],
+            seat_wind=self.seat_wind(seat),
+            prevailing_wind=self._prevailing_wind,
+            declared_melds=player.melds,
+            riichi_status=player.riichi_status,
+            is_ippatsu=player.is_ippatsu,
+            is_last_tile=pending.is_last_tile,
+            suukantsu_pao_seat=transition.suukantsu_pao_seats.get(seat),
+        )
+
+    @staticmethod
+    def _finish_round(transition: _Transition, result: RoundResult) -> None:
+        """result/event/cleanup/FINISHEDをworking copyへ一度だけ構築する。"""
+        if transition.result is not None:
+            raise RoundInvariantError("the round already has a result")
+        if any(isinstance(event, RoundEndedEvent) for event in transition.events):
+            raise RoundInvariantError("the round already has a terminal event")
+
+        transition.result = result
+        transition.current_seat = None
+        transition.drawn_tile_id = None
+        transition.drawn_tile_source = None
+        transition.pending_discarder = None
+        transition.pending_discard = None
+        transition.pending_discard_source = None
+        transition.pending_kakan = None
+        transition.pending_ankan = None
+        transition.pending_riichi_declaration = None
+        transition.pending_ron_resolution = None
+        transition.pending_kan_dora_reveals = ()
+        transition.phase = RoundPhase.FINISHED
+        transition.events = transition.events.appended((RoundEndedEvent(result),))
 
     def _apply_call(
         self,
@@ -981,22 +1147,88 @@ class RoundState:
             new_events.append(KanConfirmedEvent(seat, meld))
             new_events.extend(self._confirm_daiminkan_dora(transition, seat))
             transition.phase = RoundPhase.AWAITING_RINSHAN_DRAW
-        else:
-            # 鳴き後の打牌はツモを伴わないため、drawn tileのない
-            # `AWAITING_DISCARD`が正常状態である。
-            transition.phase = RoundPhase.AWAITING_DISCARD
+            transition.events = transition.events.appended(new_events)
+            self._finish_four_kans_if_applicable(transition)
+            return
+        # 鳴き後の打牌はツモを伴わないため、drawn tileのない
+        # `AWAITING_DISCARD`が正常状態である。
+        transition.phase = RoundPhase.AWAITING_DISCARD
         transition.events = transition.events.appended(new_events)
 
-    def _advance_after_pass(
+    def _finish_discard_without_ron(
         self,
         transition: _Transition,
-        resolution: ReactionResolution,
+        *,
+        discarder: Seat,
     ) -> None:
+        """打牌がロン・鳴きなしで解決した直後の共通後処理。
+
+        reaction不要のfast pathと、explicit all-passの両方がここを通る。
+        呼び出し前に、保留槓ドラの解放と立直確定を済ませておくこと。
+
+        次のツモへ進めるか、荒牌流局・四風連打・四家立直として終局するか
+        をここで一箇所にまとめ、判定logicを二重実装しない。
+        """
         transition.phase = RoundPhase.AWAITING_DRAW
-        transition.current_seat = resolution.source_seat.next()
+        transition.current_seat = discarder.next()
         transition.pending_discarder = None
         transition.pending_discard = None
         transition.pending_discard_source = None
+
+        if transition.wall.remaining_count == 0:
+            # 最後のlive-wall牌の打牌に対する反応windowが、Ronなしで
+            # 解決した後にだけ荒牌流局を確定する。海底ツモ・河底ロンの
+            # 機会が終わるまでは、live wallが尽きただけで終局しない。
+            result = build_exhaustive_draw_result(
+                tenpai_by_seat={
+                    seat: bool(transition.players[seat].winning_tile_types)
+                    for seat in _SEAT_ORDER
+                },
+                discards_by_seat={
+                    seat: transition.players[seat].discards for seat in _SEAT_ORDER
+                },
+                nagashi_mangan_enabled=self._rules.nagashi_mangan_enabled,
+            )
+            self._finish_round(transition, result)
+            return
+
+        abortive = first_discard_abortive_draw(
+            four_winds_enabled=self._rules.four_winds_abortive_draw_enabled,
+            four_riichi_enabled=self._rules.four_riichi_abortive_draw_enabled,
+            has_meld_occurred=any(
+                transition.players[seat].melds for seat in _SEAT_ORDER
+            ),
+            discard_tile_types_by_seat={
+                seat: tuple(
+                    discard.tile.tile_type
+                    for discard in transition.players[seat].discards
+                )
+                for seat in _SEAT_ORDER
+            },
+            riichi_established_by_seat={
+                seat: transition.players[seat].is_riichi_established
+                for seat in _SEAT_ORDER
+            },
+        )
+        if abortive is not None:
+            self._finish_round(transition, abortive)
+
+    def _finish_four_kans_if_applicable(self, transition: _Transition) -> None:
+        """槓が実際に確定した直後に四槓散了を判定する。
+
+        `_finish_round`が槍槓で流れた未成立の槓を数えないことは、この
+        methodが成立済みmeld（`transition.players[*].melds`）だけを
+        参照することで自然に満たされる。
+        """
+        result = four_kans_abortive_draw(
+            enabled=self._rules.four_kans_abortive_draw_enabled,
+            quad_counts_by_seat={
+                seat: count_quads(transition.players[seat].melds)
+                for seat in _SEAT_ORDER
+            },
+        )
+        if result is not None:
+            self._finish_round(transition, result)
 
     def _confirm_kakan(
         self,
@@ -1023,6 +1255,7 @@ class RoundState:
                 *self._reveal_kan_dora(transition, seat),
             )
         )
+        self._finish_four_kans_if_applicable(transition)
 
     def _confirm_ankan(
         self,
@@ -1049,6 +1282,7 @@ class RoundState:
                 *self._reveal_kan_dora(transition, seat),
             )
         )
+        self._finish_four_kans_if_applicable(transition)
 
     @staticmethod
     def _reveal_kan_dora(
@@ -1177,6 +1411,7 @@ class RoundState:
             phase=self._phase,
             current_seat=self._current_seat,
             drawn_tile_id=self._drawn_tile_id,
+            drawn_tile_source=self._drawn_tile_source,
             remaining_count=self._wall.remaining_count,
             can_draw_rinshan=self._wall.can_draw_rinshan,
             pending_discarder=self._pending_discarder,
@@ -1184,6 +1419,9 @@ class RoundState:
             pending_discard_source=self._pending_discard_source,
             pending_kakan=self._pending_kakan,
             pending_ankan=self._pending_ankan,
+            wall=self._wall,
+            pending_kan_dora_reveals=self._pending_kan_dora_reveals,
+            suukantsu_pao_seats=self._suukantsu_pao_seats,
         )
 
     def _transition_view(self, transition: _Transition) -> RoundView:
@@ -1192,6 +1430,7 @@ class RoundState:
             phase=transition.phase,
             current_seat=transition.current_seat,
             drawn_tile_id=transition.drawn_tile_id,
+            drawn_tile_source=transition.drawn_tile_source,
             remaining_count=transition.wall.remaining_count,
             can_draw_rinshan=transition.wall.can_draw_rinshan,
             pending_discarder=transition.pending_discarder,
@@ -1199,14 +1438,20 @@ class RoundState:
             pending_discard_source=transition.pending_discard_source,
             pending_kakan=transition.pending_kakan,
             pending_ankan=transition.pending_ankan,
+            wall=transition.wall,
+            pending_kan_dora_reveals=transition.pending_kan_dora_reveals,
+            suukantsu_pao_seats=transition.suukantsu_pao_seats,
         )
 
-    def _build_view(self, **fields) -> RoundView:
+    def _build_view(self, *, wall: Wall, **fields) -> RoundView:
         return RoundView(
             seat_winds={seat: self.seat_wind(seat) for seat in _SEAT_ORDER},
             prevailing_wind=self._prevailing_wind,
             rules=self._rules,
             round_start_points=self._round_start_points,
+            dora_indicator_tiles=wall.dora_indicator_tiles,
+            ura_dora_indicator_tiles=wall.ura_dora_indicator_tiles,
+            revealed_dora_indicator_count=wall.revealed_dora_indicator_count,
             **fields,
         )
 
@@ -1229,6 +1474,7 @@ class RoundState:
             riichi_finalizations=self._riichi_finalizations,
             suukantsu_pao_seats=dict(self._suukantsu_pao_seats),
             events=self._events,
+            result=self._result,
         )
 
     def _commit(self, transition: _Transition) -> None:
@@ -1250,6 +1496,7 @@ class RoundState:
         self._riichi_finalizations = transition.riichi_finalizations
         self._suukantsu_pao_seats = transition.suukantsu_pao_seats
         self._events = transition.events
+        self._result = transition.result
         self._revision += 1
 
     def _validate_revision(self, expected_revision: int) -> None:
@@ -1264,6 +1511,7 @@ class RoundState:
         self._validate_phase_consistency(transition)
         self._validate_pending_facts(transition)
         self._validate_seat_states(transition)
+        self._validate_terminal_state(transition)
 
     def _validate_tile_ownership(self, transition: _Transition) -> None:
         """物理牌の重複・消失がないことをownershipで確認する。
@@ -1383,6 +1631,51 @@ class RoundState:
                 raise RoundInvariantError(
                     "an established riichi requires a menzen hand"
                 )
+
+    @staticmethod
+    def _validate_terminal_state(transition: _Transition) -> None:
+        terminal_events = tuple(
+            event for event in transition.events if isinstance(event, RoundEndedEvent)
+        )
+        if transition.phase is not RoundPhase.FINISHED:
+            if transition.result is not None:
+                raise RoundInvariantError("a non-finished round must not have a result")
+            if terminal_events:
+                raise RoundInvariantError(
+                    "a non-finished round must not have a terminal event"
+                )
+            return
+
+        if transition.result is None:
+            raise RoundInvariantError("a finished round requires a result")
+        if len(terminal_events) != 1:
+            raise RoundInvariantError(
+                "a finished round requires exactly one terminal event"
+            )
+        terminal_event = terminal_events[0]
+        if terminal_event.result != transition.result:
+            raise RoundInvariantError("the terminal event must match the round result")
+        if transition.events[-1] is not terminal_event:
+            raise RoundInvariantError("the terminal event must be the last event")
+
+        pending_values = (
+            transition.current_seat,
+            transition.drawn_tile_id,
+            transition.drawn_tile_source,
+            transition.pending_discarder,
+            transition.pending_discard,
+            transition.pending_discard_source,
+            transition.pending_kakan,
+            transition.pending_ankan,
+            transition.pending_riichi_declaration,
+            transition.pending_ron_resolution,
+        )
+        if any(value is not None for value in pending_values):
+            raise RoundInvariantError("a finished round must not retain pending state")
+        if transition.pending_kan_dora_reveals:
+            raise RoundInvariantError(
+                "a finished round must not retain pending kan dora reveals"
+            )
 
     @staticmethod
     def _validate_seat(seat: Seat) -> None:
