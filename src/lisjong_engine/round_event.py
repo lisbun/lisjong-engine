@@ -4,8 +4,10 @@ eventはengine内部のaudit、test、後続の`RoundResult`構築のためだ�
 使う。mjai等の外部牌譜形式、Player配送用の差分event、席別の可視情報
 射影はengineの本moduleの責務としない。
 
-E2では反応解決・鳴き・立直・槓・フリテン遷移のeventを追加する。和了確定・
-流局・局終了のeventはE3で追加する。
+E2では反応解決・鳴き・立直・槓・フリテン遷移のeventを追加する。E3の
+terminal contractは単一の``RoundEndedEvent``でimmutableな局結果を保持し、
+`RoundState`の和了・流局confirmationがこのeventを終局commitの一部として
+記録する。
 """
 
 from collections.abc import Iterable
@@ -18,6 +20,12 @@ from lisjong_engine.reaction import ReactionResolution
 from lisjong_engine.riichi_event import (
     RiichiDeclaration,
     RiichiDeclarationFinalization,
+)
+from lisjong_engine.round_result import (
+    AbortiveDrawResult,
+    ExhaustiveDrawResult,
+    RoundResult,
+    WinResult,
 )
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import Tile
@@ -210,6 +218,20 @@ class MissedRonRecordedEvent(RoundEvent):
         if not isinstance(self.reason, FuritenReason):
             raise TypeError("reason must be a FuritenReason")
         validate_missed_ron_reason(self.reason)
+
+
+@dataclass(frozen=True)
+class RoundEndedEvent(RoundEvent):
+    """局の唯一のterminal resultを記録するevent。"""
+
+    result: RoundResult
+
+    def __post_init__(self) -> None:
+        if not isinstance(
+            self.result,
+            (WinResult, ExhaustiveDrawResult, AbortiveDrawResult),
+        ):
+            raise TypeError("result must be a RoundResult")
 
 
 @dataclass(frozen=True)
