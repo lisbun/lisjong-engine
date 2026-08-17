@@ -14,7 +14,11 @@ from enum import Enum
 
 from lisjong_engine.final_score import FinalScoreCalculation
 from lisjong_engine.points import SeatPoints
-from lisjong_engine.round_allocation import RoundRandomProvenance
+from lisjong_engine.round_allocation import (
+    RoundRandomProvenance,
+    create_round_random_provenance,
+    create_round_wall,
+)
 from lisjong_engine.round_result import RoundResult
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.rules import MatchFormat, RuleSet
@@ -224,6 +228,10 @@ class MatchState:
         # としてnext round ordinalを導出するための内部state。
         # global counterではなく、このinstanceだけが所有する。
         self._started_round_count = 0
+        # active roundのrandom provenance。`start_round()`が完全成功した
+        # ときだけ設定し、後続段階の`CompletedRound.random_provenance`へ
+        # そのまま引き継ぐ。
+        self._active_round_random_provenance: RoundRandomProvenance | None = None
 
     @property
     def rules(self) -> RuleSet:
@@ -256,6 +264,44 @@ class MatchState:
     @property
     def match_seed(self) -> int:
         return self._match_seed
+
+    def start_round(self) -> RoundState:
+        """deterministicかつatomicに次局を開始し、配牌済みの`RoundState`を返す。
+
+        `MatchPhase.AWAITING_ROUND`のときだけ成功する。round ordinal決定、
+        `RoundRandomProvenance`生成、Wall生成、`RoundState`構築、
+        `RoundState.deal()`をすべてlocal candidateとして成功させてから、
+        最後にまとめてauthoritative stateへcommitする。途中で失敗した場合、
+        `self`は一切mutationしない。
+        """
+        if self._phase is not MatchPhase.AWAITING_ROUND:
+            raise RuntimeError("start_round() requires MatchPhase.AWAITING_ROUND")
+        if self._active_round is not None:
+            raise RuntimeError("start_round() requires no active round in progress")
+
+        round_ordinal = self._started_round_count + 1
+
+        provenance = create_round_random_provenance(
+            self._match_seed,
+            round_ordinal,
+        )
+        wall = create_round_wall(provenance)
+
+        candidate_round = RoundState(
+            wall,
+            round_start_points=self._scores.as_dict(),
+            dealer_seat=self._position.dealer_seat,
+            prevailing_wind=self._position.prevailing_wind,
+            rules=self._rules,
+        )
+        candidate_round.deal()
+
+        self._active_round = candidate_round
+        self._active_round_random_provenance = provenance
+        self._started_round_count = round_ordinal
+        self._phase = MatchPhase.ROUND_IN_PROGRESS
+
+        return candidate_round
 
 
 def _resolve_starting_scores(
