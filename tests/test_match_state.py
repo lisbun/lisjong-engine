@@ -29,7 +29,7 @@ from lisjong_engine.round_result import (
     WinResult,
 )
 from lisjong_engine.round_state import RoundState
-from lisjong_engine.rules import MatchFormat, RuleSet
+from lisjong_engine.rules import FinalRankTiePolicy, MatchFormat, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import calculate_round_settlement
 from lisjong_engine.tile import STANDARD_TILES
@@ -62,6 +62,7 @@ def _winning_player(
     *,
     method: WinMethod,
     dealer_seat: Seat = Seat.EAST,
+    rules: RuleSet | None = None,
 ) -> WinningPlayerResult:
     concealed_tiles = tuple(
         STANDARD_TILES[tile_type_id * 4 + copy_index]
@@ -85,6 +86,7 @@ def _winning_player(
         score_selection=evaluate_winning_scores(
             context,
             dora_indicators=DoraIndicators(),
+            rules=rules,
         ),
     )
 
@@ -95,9 +97,10 @@ def _win_result(
     method: WinMethod,
     dealer_seat: Seat = Seat.EAST,
     source_seat: Seat | None = None,
+    rules: RuleSet | None = None,
 ) -> WinResult:
     winners = tuple(
-        _winning_player(seat, method=method, dealer_seat=dealer_seat)
+        _winning_player(seat, method=method, dealer_seat=dealer_seat, rules=rules)
         for seat in winner_seats
     )
     return WinResult(
@@ -1944,6 +1947,492 @@ class MatchEndReasonValidationTest(unittest.TestCase):
             _match_end_reason(
                 position, result, scores_after, dealer_continues, "not-rules"
             )
+
+
+def _match_at_position(
+    seed: int,
+    position: RoundPosition,
+    *,
+    starting_scores=None,
+    rules=None,
+) -> MatchState:
+    """testのためだけに、MatchStateを任意のRoundPositionから開始させる。
+
+    productionのpublic constructorは常にEast1で初期化する（East1固定は
+    Issue #24第2段階のcontract）。terminal integration testでは
+    South4/West1〜4等のend-stage positionを直接検証する必要があるため、
+    private field `_position`をtest側から直接上書きする。production側に
+    position注入APIは追加しない。
+    """
+    match = MatchState(seed=seed, rules=rules, starting_scores=starting_scores)
+    match._position = position
+    return match
+
+
+class SettleActiveRoundTerminalFinalRoundTest(unittest.TestCase):
+    def test_west_four_dealer_flow_ends_with_final_round(self) -> None:
+        position = _position(Wind.WEST, 4)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+
+        completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+        self.assertIsNotNone(match.completed_match)
+        self.assertIs(match.completed_match.end_reason, MatchEndReason.FINAL_ROUND)
+        self.assertEqual(match.position, position)
+        self.assertIsNone(match.active_round)
+        self.assertIsNone(match._active_round_random_provenance)
+        self.assertEqual(match.scores, match.completed_match.final_raw_scores)
+        self.assertEqual(match.history, match.completed_match.history)
+        self.assertIs(match.completed_match.history[-1], completed)
+        self.assertIsNone(match.completed_match.history[-1].next_position)
+        self.assertEqual(match.completed_match.final_riichi_stick_awards, ())
+
+    def test_west_four_dealer_continuation_ends_with_final_round(self) -> None:
+        position = _position(Wind.WEST, 4)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+
+        completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+        self.assertIs(match.completed_match.end_reason, MatchEndReason.FINAL_ROUND)
+
+    def test_next_round_position_is_never_called_on_the_terminal_path(self) -> None:
+        position = _position(Wind.WEST, 4)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+
+        with patch(
+            "lisjong_engine.match_state._next_round_position",
+            side_effect=AssertionError(
+                "_next_round_position() must not be called on the terminal path"
+            ),
+        ):
+            completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+
+
+class SettleActiveRoundTerminalDealerStopTest(unittest.TestCase):
+    def test_south_four_dealer_win_top_and_target_ends_with_dealer_win(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        starting_scores = {
+            Seat.EAST: 20_000,
+            Seat.SOUTH: 20_000,
+            Seat.WEST: 20_000,
+            Seat.NORTH: 40_000,
+        }
+        match = _match_at_position(1, position, starting_scores=starting_scores)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+
+        completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+        self.assertIs(match.completed_match.end_reason, MatchEndReason.DEALER_WIN)
+        self.assertEqual(match.completed_match.final_riichi_stick_awards, ())
+        self.assertEqual(match.completed_match.final_raw_scores, match.scores)
+        self.assertEqual(match.completed_match.history, (completed,))
+
+    def test_south_four_dealer_tenpai_top_and_target_ends_with_dealer_tenpai(
+        self,
+    ) -> None:
+        position = _position(Wind.SOUTH, 4)
+        starting_scores = {
+            Seat.EAST: 20_000,
+            Seat.SOUTH: 20_000,
+            Seat.WEST: 20_000,
+            Seat.NORTH: 40_000,
+        }
+        match = _match_at_position(1, position, starting_scores=starting_scores)
+        round_state = match.start_round()
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.NORTH,))
+        _finish_round(round_state, result)
+
+        completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+        self.assertIs(match.completed_match.end_reason, MatchEndReason.DEALER_TENPAI)
+
+
+class SettleActiveRoundTerminalTargetReachedTest(unittest.TestCase):
+    def test_south_four_dealer_flow_target_reached_ends(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        starting_scores = {
+            Seat.EAST: 28_500,
+            Seat.SOUTH: 24_000,
+            Seat.WEST: 24_000,
+            Seat.NORTH: 23_500,
+        }
+        match = _match_at_position(1, position, starting_scores=starting_scores)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+
+        completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+        self.assertIs(match.completed_match.end_reason, MatchEndReason.TARGET_REACHED)
+
+
+class SettleActiveRoundTerminalSouthFourFlowTest(unittest.TestCase):
+    def _south_four_child_win(self, *, rules: RuleSet | None = None) -> WinResult:
+        return _win_result(
+            (Seat.EAST,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.NORTH,
+            source_seat=Seat.NORTH,
+            rules=rules,
+        )
+
+    def test_west_round_enabled_flows_to_west_one_non_terminally(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        _finish_round(round_state, self._south_four_child_win())
+
+        completed = match.settle_active_round()
+
+        self.assertIsNotNone(completed.next_position)
+        self.assertEqual(
+            completed.next_position,
+            _position(Wind.WEST, 1),
+        )
+        self.assertIs(match.phase, MatchPhase.AWAITING_ROUND)
+        self.assertIsNone(match.completed_match)
+        self.assertEqual(match.position, completed.next_position)
+
+    def test_west_round_disabled_ends_with_final_round(self) -> None:
+        position = _position(Wind.SOUTH, 4)
+        rules = replace(RuleSet.default(), west_round_enabled=False)
+        match = _match_at_position(1, position, rules=rules)
+        round_state = match.start_round()
+        _finish_round(round_state, self._south_four_child_win(rules=rules))
+
+        completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+        self.assertIs(match.completed_match.end_reason, MatchEndReason.FINAL_ROUND)
+
+
+class SettleActiveRoundTerminalBankruptcyTest(unittest.TestCase):
+    def test_bankruptcy_ends_the_match_with_bankruptcy_adjustment(self) -> None:
+        position = _position(Wind.EAST, 1)
+        starting_scores = {
+            Seat.EAST: 25_000,
+            Seat.SOUTH: 25_000,
+            Seat.WEST: 1_000,
+            Seat.NORTH: 25_000,
+        }
+        match = _match_at_position(1, position, starting_scores=starting_scores)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.SOUTH,),
+            method=WinMethod.RON,
+            dealer_seat=Seat.EAST,
+            source_seat=Seat.WEST,
+        )
+        _finish_round(round_state, result)
+
+        completed = match.settle_active_round()
+
+        self.assertIsNone(completed.next_position)
+        self.assertIs(match.phase, MatchPhase.FINISHED)
+        self.assertIs(match.completed_match.end_reason, MatchEndReason.BANKRUPTCY)
+
+        self.assertLess(completed.scores_after_settlement[Seat.WEST], 0)
+        # bankruptcy adjustmentはfinal raw scoresへ直接加算されない。
+        self.assertEqual(
+            match.completed_match.final_raw_scores[Seat.WEST],
+            completed.scores_after_settlement[Seat.WEST],
+        )
+        # 一方、FinalScoreCalculation側にはadjustmentが反映される。
+        west_final = match.completed_match.final_score.for_seat(Seat.WEST)
+        south_final = match.completed_match.final_score.for_seat(Seat.SOUTH)
+        self.assertNotEqual(west_final.bankruptcy_points, 0)
+        self.assertNotEqual(south_final.bankruptcy_points, 0)
+
+    def test_bankruptcy_recipient_ambiguity_is_fail_closed_and_atomic(self) -> None:
+        # WESTはこの局でtenpaiとしてnoten penaltyのrecipientになるだけで、
+        # 誰への支払いもしていない（settlement.transfersにpayerとして
+        # 一度も現れない）。それでも精算後になお破産している場合、F1の
+        # `calculate_bankruptcy_points_from_transfers()`はrecipientを
+        # 一意に導出できずfail closedする。
+        position = _position(Wind.EAST, 1)
+        starting_scores = {
+            Seat.EAST: 25_000,
+            Seat.SOUTH: 25_000,
+            Seat.WEST: -20_000,
+            Seat.NORTH: 25_000,
+        }
+        match = _match_at_position(1, position, starting_scores=starting_scores)
+        round_state = match.start_round()
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.WEST,))
+        _finish_round(round_state, result)
+        scores_before = match.scores
+        provenance_before = match._active_round_random_provenance
+
+        with self.assertRaises(ValueError):
+            match.settle_active_round()
+
+        self.assertIs(match.phase, MatchPhase.ROUND_IN_PROGRESS)
+        self.assertIs(match.active_round, round_state)
+        self.assertIs(match._active_round_random_provenance, provenance_before)
+        self.assertEqual(match.scores, scores_before)
+        self.assertEqual(match.history, ())
+        self.assertIsNone(match.completed_match)
+
+
+class SettleActiveRoundTerminalFinalRiichiAwardTest(unittest.TestCase):
+    def test_remaining_riichi_sticks_are_awarded_and_kept_out_of_round_settlement(
+        self,
+    ) -> None:
+        position = _position(Wind.WEST, 4, riichi_sticks=2)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        result = ExhaustiveDrawResult()
+        _finish_round(round_state, result)
+
+        completed = match.settle_active_round()
+
+        self.assertEqual(completed.settlement.riichi_stick_awards, ())
+        self.assertEqual(completed.settlement.riichi_sticks_after, 2)
+
+        self.assertEqual(len(match.completed_match.final_riichi_stick_awards), 1)
+        award = match.completed_match.final_riichi_stick_awards[0]
+        self.assertEqual(award.amount, 2_000)
+        self.assertEqual(
+            match.completed_match.final_raw_scores[award.recipient],
+            completed.scores_after_settlement[award.recipient] + 2_000,
+        )
+        self.assertEqual(match.scores, match.completed_match.final_raw_scores)
+
+    def test_no_remaining_riichi_sticks_yields_no_final_awards(self) -> None:
+        position = _position(Wind.WEST, 4)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+
+        match.settle_active_round()
+
+        self.assertEqual(match.completed_match.final_riichi_stick_awards, ())
+
+    def test_split_rank_points_tie_produces_multiple_final_awards(self) -> None:
+        position = _position(Wind.WEST, 4, riichi_sticks=2)
+        rules = replace(
+            RuleSet.default(),
+            final_rank_tie_policy=FinalRankTiePolicy.SPLIT_RANK_POINTS,
+        )
+        starting_scores = {
+            Seat.EAST: 30_000,
+            Seat.SOUTH: 30_000,
+            Seat.WEST: 20_000,
+            Seat.NORTH: 20_000,
+        }
+        match = _match_at_position(
+            1, position, starting_scores=starting_scores, rules=rules
+        )
+        round_state = match.start_round()
+        result = ExhaustiveDrawResult()
+        _finish_round(round_state, result)
+
+        match.settle_active_round()
+
+        awards = match.completed_match.final_riichi_stick_awards
+        self.assertEqual(len(awards), 2)
+        self.assertEqual(sum(award.amount for award in awards), 2_000)
+        self.assertEqual({award.recipient for award in awards}, {Seat.EAST, Seat.SOUTH})
+
+
+class SettleActiveRoundTerminalDoubleOperationTest(unittest.TestCase):
+    def _finished_match(self) -> MatchState:
+        position = _position(Wind.WEST, 4)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+        match.settle_active_round()
+        return match
+
+    def test_rejects_start_round_after_terminal_settlement(self) -> None:
+        match = self._finished_match()
+
+        with self.assertRaises(RuntimeError):
+            match.start_round()
+
+    def test_rejects_settle_active_round_after_terminal_settlement(self) -> None:
+        match = self._finished_match()
+        history_before = match.history
+        completed_match_before = match.completed_match
+
+        with self.assertRaises(RuntimeError):
+            match.settle_active_round()
+
+        self.assertEqual(match.history, history_before)
+        self.assertIs(match.completed_match, completed_match_before)
+
+
+class SettleActiveRoundTerminalTransactionalityTest(unittest.TestCase):
+    def _prepare(self):
+        position = _position(Wind.WEST, 4)
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        result = _win_result(
+            (Seat.NORTH,),
+            method=WinMethod.TSUMO,
+            dealer_seat=Seat.NORTH,
+        )
+        _finish_round(round_state, result)
+        return match, round_state
+
+    def _assert_untouched(self, match, round_state, provenance_before, scores_before):
+        self.assertIs(match.phase, MatchPhase.ROUND_IN_PROGRESS)
+        self.assertIs(match.active_round, round_state)
+        self.assertIs(match._active_round_random_provenance, provenance_before)
+        self.assertEqual(match.scores, scores_before)
+        self.assertEqual(match.history, ())
+        self.assertIsNone(match.completed_match)
+        self.assertEqual(match._started_round_count, 1)
+
+    def test_bankruptcy_points_failure_leaves_match_state_untouched(self) -> None:
+        position = _position(Wind.EAST, 1)
+        starting_scores = {
+            Seat.EAST: 25_000,
+            Seat.SOUTH: 25_000,
+            Seat.WEST: -1,
+            Seat.NORTH: 25_000,
+        }
+        match = _match_at_position(1, position, starting_scores=starting_scores)
+        round_state = match.start_round()
+        result = ExhaustiveDrawResult(tenpai_seats=(Seat.EAST, Seat.SOUTH, Seat.NORTH))
+        _finish_round(round_state, result)
+        provenance_before = match._active_round_random_provenance
+        scores_before = match.scores
+
+        with patch(
+            "lisjong_engine.match_state.calculate_bankruptcy_points_from_transfers",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                match.settle_active_round()
+
+        self._assert_untouched(match, round_state, provenance_before, scores_before)
+
+    def test_final_riichi_award_failure_leaves_match_state_untouched(self) -> None:
+        match, round_state = self._prepare()
+        provenance_before = match._active_round_random_provenance
+        scores_before = match.scores
+
+        with patch(
+            "lisjong_engine.match_state.calculate_final_riichi_stick_awards",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                match.settle_active_round()
+
+        self._assert_untouched(match, round_state, provenance_before, scores_before)
+
+    def test_final_scores_failure_leaves_match_state_untouched(self) -> None:
+        match, round_state = self._prepare()
+        provenance_before = match._active_round_random_provenance
+        scores_before = match.scores
+
+        with patch(
+            "lisjong_engine.match_state.calculate_final_scores",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                match.settle_active_round()
+
+        self._assert_untouched(match, round_state, provenance_before, scores_before)
+
+
+class DeterministicMatchLifecycleTest(unittest.TestCase):
+    def test_same_seed_and_result_sequence_produce_identical_terminal_facts(
+        self,
+    ) -> None:
+        position = _position(Wind.WEST, 4)
+
+        def _run() -> MatchState:
+            match = _match_at_position(777, position)
+            round_state = match.start_round()
+            result = _win_result(
+                (Seat.NORTH,),
+                method=WinMethod.TSUMO,
+                dealer_seat=Seat.NORTH,
+            )
+            _finish_round(round_state, result)
+            match.settle_active_round()
+            return match
+
+        first = _run()
+        second = _run()
+
+        self.assertEqual(
+            first.history[0].random_provenance,
+            second.history[0].random_provenance,
+        )
+        self.assertIs(
+            first.completed_match.end_reason,
+            second.completed_match.end_reason,
+        )
+        self.assertEqual(
+            first.completed_match.final_raw_scores,
+            second.completed_match.final_raw_scores,
+        )
+        self.assertEqual(first.scores, second.scores)
+        self.assertEqual(
+            first.completed_match.final_score,
+            second.completed_match.final_score,
+        )
 
 
 if __name__ == "__main__":

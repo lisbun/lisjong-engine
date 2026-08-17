@@ -466,13 +466,14 @@ winning shape exists != legal scored win
 
 ### 後続Issueへ送った内容
 
-`RuleSet` は設定値だけを表すため、次はいずれも本ルール契約の外にあり、
-後続Issueで実装する。
+`RuleSet` は設定値だけを表すため、次はいずれも本ルール契約の外にある。
+このうち局の状態遷移・局精算・最終順位計算・半荘の状態管理は、Issue #15
+〜#24で `round_state.py` / `settlement.py` / `final_score.py` /
+`match_state.py` として実装済みである（本書「9. 得点評価とRuleSet」、
+`docs/architecture.md` の「局のcore API」「局精算（Round settlement）」
+「MatchState（F2）」を参照）。後続Issueへ送るのは次のみ。
 
-- 合法手生成、反応解決、立直判定、局の状態遷移
-- 本場・供託を含む局精算、複数ロンの支払配分、パオの最終精算
-- 最終順位計算、半荘の状態管理
-- 席別観測、対局driver
+- 席別観測、外部action selectorを呼び出す対局driver、AI / Policy
 
 役判定logic、符計算、ドラ計算、翻・符の統合、点数計算は得点評価層として
 実装済みであり、「9. 得点評価とRuleSet」で扱う。それ以外のfieldは現時点では
@@ -482,8 +483,6 @@ winning shape exists != legal scored win
 ### ルール自体の未実装・未確定事項
 
 - 東風戦、三人麻雀など、標準半荘以外の対局形式は未実装
-- 終了基準が `first_place_target_points` ちょうどの場合の扱いは未確定。
-  推測で実装しない
 - 赤牌枚数、喰い断などは、現時点では `RuleSet` のconfig対象にしていない
 
 ## 11. 外部サービスのルール

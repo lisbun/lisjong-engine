@@ -1,18 +1,33 @@
-"""半荘全体を束ねるMatch層のimmutable value objectと初期stateを定義するmodule。
+"""半荘全体を束ねるMatch層のstate machineを定義するmodule（Issue #24, F2）。
 
 Issue #21（F1）で確定した局精算 / 最終score計算はpure calculationとして
-再実装しない。本moduleはF2として、それらのpure APIを後から適切な順序で
-呼び出すための「箱」（value objectと初期state）だけを提供する。
+再実装せず、本moduleはそれらのpure APIを正しい順序で呼び出すorchestration
+層に徹する。`MatchState`は複数の`RoundState`を1つの半荘として束ね、
+指定seedと（呼び出し側が選んだ合法action列の結果である）`RoundResult`から、
+東1局開始から半荘終了・最終score確定までを決定的に進行する。
 
-局開始・Wall割当・settlement適用・局進行・半荘終了判定は本moduleの責務では
-なく、後続段階で追加する。
+```text
+MatchState.start_round()
+    -> deterministic Wall / RoundState / deal()
+
+MatchState.settle_active_round()
+    -> calculate_round_settlement()（F1）
+    -> match end判定
+    -> non-terminalならnext RoundPositionへ、terminalならfinalizationへ
+    -> CompletedRound / (terminal時のみ)CompletedMatch
+    -> atomic commit
+```
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
-from lisjong_engine.final_score import FinalScoreCalculation
+from lisjong_engine.final_score import (
+    FinalScoreCalculation,
+    calculate_bankruptcy_points_from_transfers,
+    calculate_final_scores,
+)
 from lisjong_engine.points import SeatPoints
 from lisjong_engine.round_allocation import (
     RoundRandomProvenance,
@@ -32,6 +47,7 @@ from lisjong_engine.seat import Seat
 from lisjong_engine.settlement import (
     RiichiStickAward,
     RoundSettlement,
+    calculate_final_riichi_stick_awards,
     calculate_round_settlement,
 )
 from lisjong_engine.wind import Wind
@@ -199,9 +215,15 @@ class CompletedMatch:
 class MatchState:
     """半荘全体のauthoritativeな状態。
 
-    今回の段階では初期化して read-only に参照できるところまでを実装する。
-    局開始・Wall割当・settlement適用・局進行・半荘終了判定は後続段階の
-    責務であり、ここでは行わない。
+    所有するauthoritative factは、`RuleSet`、4席のraw score（`SeatPoints`）、
+    現在（または半荘終了時点で最後に実際に開始された）`RoundPosition`、
+    `MatchPhase`、進行中の`RoundState | None`、`CompletedRound`の履歴、
+    deterministic round allocationに必要な内部state、終了後の
+    `CompletedMatch | None`である。
+
+    `FINISHED`後も`position`は最後に実際に開始された局の位置のままであり、
+    仮想的な次局位置（例: West4終了後のNorth1）へは書き換えない。半荘の
+    最終結果の正本は常に`completed_match`である。
     """
 
     def __init__(
@@ -316,21 +338,36 @@ class MatchState:
         return candidate_round
 
     def settle_active_round(self) -> CompletedRound:
-        """終了済みactive roundをF1でpureに精算し、non-terminal局として次局
-        待ちstateへatomicにcommitする。
+        """終了済みactive roundをF1でpureに精算し、non-terminalなら次局待ち
+        stateへ、terminalなら半荘finalizationまでatomicにcommitする。
 
         `MatchPhase.ROUND_IN_PROGRESS`かつ、active roundが
         `RoundPhase.FINISHED`で`result`を確定しているときだけ成功する。
         精算計算そのものは一切再実装せず、`calculate_round_settlement()`
-        （F1）を唯一の正本として使う。dealer continuation・next position
-        （非terminal限定）もIssue #24第4段階のpure helperをそのまま使う。
+        （F1）を唯一の正本として使う。dealer continuation・next position・
+        match end判定もIssue #24前段階のpure helperをそのまま使う。
 
-        すべてのcandidate計算が成功するまで`self`を一切mutationせず、
-        成功した場合だけ最後にまとめてcommitする。途中で例外になった
-        場合、終了済みのactive roundとそのprovenanceを含め、`self`は
-        呼び出し前と完全に同一のままとなる。match終了判定（bankruptcy、
-        南4/西4終局、TARGET_REACHED等）は本メソッドの責務ではなく、
-        後続段階で追加する。
+        判定順序は次で固定する。
+
+        ```text
+        context / provenance validation
+            -> calculate_round_settlement()
+            -> scores_after_settlement
+            -> _dealer_continues()
+            -> _match_end_reason()
+        ```
+
+        ``_match_end_reason() is None`` ならnon-terminalとして
+        ``_next_round_position()`` で次局位置を計算する。``None``でない
+        場合はterminalとして、``_next_round_position()``を一切呼ばずに
+        （西4終了後の仮想North1等を作らない）、必要ならbankruptcy
+        adjustmentを、続けて残存riichi sticksの最終配分を、それぞれF1へ
+        委譲してから``calculate_final_scores()``で最終scoreを確定する。
+
+        すべてのcandidate計算・value object構築が成功するまで`self`を
+        一切mutationせず、成功した場合だけ最後にまとめてcommitする。
+        途中で例外になった場合、終了済みのactive roundとそのprovenanceを
+        含め、`self`は呼び出し前と完全に同一のままとなる。
         """
         if self._phase is not MatchPhase.ROUND_IN_PROGRESS:
             raise RuntimeError(
@@ -384,6 +421,41 @@ class MatchState:
 
         scores_after = self._scores.add(settlement.point_deltas)
         dealer_continues = _dealer_continues(result, self._position.dealer_seat)
+        end_reason = _match_end_reason(
+            self._position,
+            result,
+            scores_after,
+            dealer_continues,
+            self._rules,
+        )
+
+        if end_reason is None:
+            return self._commit_non_terminal_settlement(
+                provenance=provenance,
+                result=result,
+                settlement=settlement,
+                scores_after=scores_after,
+                dealer_continues=dealer_continues,
+            )
+
+        return self._commit_terminal_settlement(
+            provenance=provenance,
+            result=result,
+            settlement=settlement,
+            scores_after=scores_after,
+            dealer_continues=dealer_continues,
+            end_reason=end_reason,
+        )
+
+    def _commit_non_terminal_settlement(
+        self,
+        *,
+        provenance: RoundRandomProvenance,
+        result: RoundResult,
+        settlement: RoundSettlement,
+        scores_after: SeatPoints,
+        dealer_continues: bool,
+    ) -> CompletedRound:
         next_position = _next_round_position(
             self._position,
             result,
@@ -408,6 +480,69 @@ class MatchState:
         self._active_round = None
         self._active_round_random_provenance = None
         self._phase = MatchPhase.AWAITING_ROUND
+
+        return completed_round
+
+    def _commit_terminal_settlement(
+        self,
+        *,
+        provenance: RoundRandomProvenance,
+        result: RoundResult,
+        settlement: RoundSettlement,
+        scores_after: SeatPoints,
+        dealer_continues: bool,
+        end_reason: MatchEndReason,
+    ) -> CompletedRound:
+        bankruptcy_points = (
+            calculate_bankruptcy_points_from_transfers(
+                _bankrupt_seats(scores_after, self._rules),
+                settlement.transfers,
+                rules=self._rules,
+            )
+            if end_reason is MatchEndReason.BANKRUPTCY
+            else None
+        )
+
+        final_riichi_stick_awards = calculate_final_riichi_stick_awards(
+            scores_after,
+            settlement.riichi_sticks_after,
+            rules=self._rules,
+        )
+        final_raw_scores = scores_after.add(
+            _riichi_stick_award_deltas(final_riichi_stick_awards)
+        )
+
+        final_score = calculate_final_scores(
+            final_raw_scores.as_dict(),
+            rules=self._rules,
+            bankruptcy_points=bankruptcy_points,
+        )
+
+        completed_round = CompletedRound(
+            random_provenance=provenance,
+            position_before=self._position,
+            result=result,
+            settlement=settlement,
+            scores_after_settlement=scores_after,
+            dealer_continues=dealer_continues,
+            next_position=None,
+        )
+        history_after = self._history + (completed_round,)
+
+        completed_match = CompletedMatch(
+            end_reason=end_reason,
+            final_riichi_stick_awards=final_riichi_stick_awards,
+            final_raw_scores=final_raw_scores,
+            final_score=final_score,
+            history=history_after,
+        )
+
+        self._scores = final_raw_scores
+        self._history = history_after
+        self._active_round = None
+        self._active_round_random_provenance = None
+        self._completed_match = completed_match
+        self._phase = MatchPhase.FINISHED
 
         return completed_round
 
@@ -507,6 +642,30 @@ def _next_round_position(
         honba=honba,
         riichi_sticks=riichi_sticks,
     )
+
+
+def _riichi_stick_award_deltas(
+    awards: tuple[RiichiStickAward, ...],
+) -> SeatPoints:
+    """final riichi stick awardのrecipient別合計を`SeatPoints`へ集約するだけの
+    pure helper。
+
+    誰へいくら配るかは`calculate_final_riichi_stick_awards()`（F1）の責務で
+    あり、ここではその結果をraw scoreへ足し込むための単純な合算だけを行う。
+    """
+    try:
+        award_tuple = tuple(awards)
+    except TypeError:
+        raise TypeError(
+            "awards must be an iterable of RiichiStickAward values"
+        ) from None
+    if any(not isinstance(award, RiichiStickAward) for award in award_tuple):
+        raise TypeError("awards must contain only RiichiStickAward values")
+
+    deltas = {seat: 0 for seat in Seat}
+    for award in award_tuple:
+        deltas[award.recipient] += award.amount
+    return SeatPoints.from_mapping(deltas)
 
 
 def _first_place_seat(scores: SeatPoints) -> Seat:
