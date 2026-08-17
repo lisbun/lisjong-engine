@@ -401,6 +401,153 @@ F1が提供するのは次のpure calculation layerである。
 - 飛び判定そのもの（飛んだ席が生じたかどうかの判定）
 - deterministic round seed allocation
 
+これらはIssue #24でF2として実装済みである。詳細は本書「MatchState（F2）」
+を参照。
+
+## MatchState（F2）
+
+`match_state.py` の `MatchState` は、複数の `RoundState` を1つの半荘として
+束ね、指定match seedと（呼び出し側が選んだ合法action列の結果である）
+`RoundResult`から、東1局開始から半荘終了・最終score確定までを決定的に
+進行するstate machineである（Issue #24）。F1（局精算・最終score計算）の
+pure calculationを再実装せず、それらを正しい順序で呼び出すorchestration
+層に徹する。
+
+### 所有するauthoritative state
+
+`MatchState` が所有するauthoritative factは次のとおり。
+
+- `RuleSet`
+- 4席のraw score（`SeatPoints`）
+- 現在（または半荘終了時点で最後に実際に開始された）`RoundPosition`
+- `MatchPhase`（`AWAITING_ROUND` / `ROUND_IN_PROGRESS` / `FINISHED`）
+- 進行中の `RoundState | None`
+- 完了した局の履歴 `tuple[CompletedRound, ...]`
+- deterministic round allocationに必要な内部state
+  （match seed、成功裏に開始した局数）
+- 半荘終了後の `CompletedMatch | None`
+
+`MatchState.scores` が対局中のraw scoreのauthorityである。`RoundState`へは
+局開始時に、その時点の `scores` のimmutable snapshotを
+`round_start_points` として渡すだけであり、局中の立直等でMatchStateを
+逐次mutationしない（本書「Matchとの点数境界」参照）。
+
+### 局開始: `start_round()`
+
+`MatchPhase.AWAITING_ROUND`のときだけ成功する。
+
+```text
+round ordinal = 成功裏に開始した局数 + 1
+    -> create_round_random_provenance(match_seed, round_ordinal)
+    -> create_round_wall(provenance)
+    -> RoundState構築（round_start_points = 現在のscores snapshot）
+    -> RoundState.deal()
+    -> 成功後だけauthoritative stateへcommit
+```
+
+Wall生成・`RoundState`構築・`deal()`はすべてlocal candidateとして行い、
+すべて成功した場合だけ`active_round` / `active_round`のprovenance /
+成功裏に開始した局数 / `phase`をまとめてcommitする。途中で失敗した場合、
+`MatchState`は一切mutationされず、次に`start_round()`を呼んだときの
+round ordinalも進まない。callerはWall生成や`RoundState.deal()`を自分で
+呼ばず、常に配牌済み（`AWAITING_DRAW`）の`RoundState`を受け取る。
+
+### 局終了: `settle_active_round()`
+
+public settlement入口はこの1メソッドへ集約する。`finish()`のような別の
+終了APIは存在しない。`MatchPhase.ROUND_IN_PROGRESS`かつ、active round
+が`RoundPhase.FINISHED`で`result`を確定しているときだけ成功する。
+
+```text
+active RoundStateのcontext / provenance validation
+    -> calculate_round_settlement(...)   # F1
+    -> scores_after_settlement = scores.add(settlement.point_deltas)
+    -> dealer_continues = _dealer_continues(result, dealer_seat)
+    -> end_reason = _match_end_reason(position, result, scores_after_settlement,
+                                       dealer_continues, rules)
+```
+
+ここまでは`self`を一切mutationしない。`end_reason`の有無でnon-terminalと
+terminalの2つのpathへ分岐する。
+
+**non-terminal**（`end_reason is None`）: `_next_round_position()`で次局
+positionを計算し、`CompletedRound(next_position=...)`を構築してから、
+`scores` / `position` / `history` / `active_round` / provenance / `phase`
+（`AWAITING_ROUND`へ）をまとめてcommitする。
+
+**terminal**（`end_reason is not None`）: `_next_round_position()`を一切
+呼ばない。西4終了後の仮想North1のような、実際には開始されない次局
+positionを生成しないためである。代わりに次の順序でfinalizationを行う。
+
+```text
+1. RoundSettlementの適用は既に済んでいる（scores_after_settlement）
+2. end_reasonがBANKRUPTCYの場合だけ、_bankrupt_seats()で破産席を
+   抽出し、calculate_bankruptcy_points_from_transfers()（F1）で
+   その局のSettlementTransferから飛び賞recipientを導出する
+3. calculate_final_riichi_stick_awards()（F1）で残存供託を
+   scores_after_settlementベースの最終1位席群へ配分する
+4. 配分結果をscores_after_settlementへ加算し、final_raw_scoresとする
+5. calculate_final_scores(final_raw_scores, rules, bankruptcy_points)
+   （F1）で最終score（粗点・ウマ・オカ・順位点・bankruptcy調整）を確定する
+6. CompletedRound(next_position=None) / CompletedMatchを構築する
+7. すべて成功した場合だけ、scores / history / active_round / provenance /
+   completed_match / phase（FINISHEDへ）をまとめてcommitする
+```
+
+bankruptcyのrecipientをMatchState側で推測すること（winner・top席・dealer
+等へのfallback）は禁止する。F1が監査可能な`SettlementTransfer`から
+recipientを導出できない場合はfail closedとし、その場合`MatchState`は
+一切mutationしない（終了済みのactive roundはattachedのまま残る）。
+
+### `scores_after_settlement` と `final_raw_scores` の違い
+
+`CompletedRound.scores_after_settlement`は、F1 `RoundSettlement`適用直後・
+Match終端のfinal riichi award適用前のraw scoreである。terminal時に残存
+供託を最終配分しても、この値は書き換えない。一方
+`CompletedMatch.final_raw_scores`はfinal riichi award適用後のraw score
+であり、terminal commit後の`MatchState.scores`はこの値と一致する。
+
+同様に、final riichi awardは最後の`RoundSettlement`（`settlement`
+field）へ混ぜない。`RoundSettlement.riichi_stick_awards`は局内winnerへの
+供託授与だけを表し、match終了時の残存供託配分は
+`CompletedMatch.final_riichi_stick_awards`という別のMatch終端factとして
+保持する。bankruptcy adjustmentも同様に、final raw scoresへ直接加算せず、
+`FinalScoreCalculation`側のadjustmentとしてのみ反映する。
+
+### terminal時の `MatchState.position`
+
+terminalになっても`MatchState.position`は上書きしない。半荘終了時点の
+`position`は、最後に実際に`start_round()`で開始された局の位置のままで
+ある（例: 西4で終了した場合は西4のまま、南4の親流れで終了した場合は
+南4のまま）。半荘の最終結果の正本は常に`MatchState.completed_match`
+である。
+
+### match end判定の意味
+
+`_match_end_reason()`の判定順序と各`MatchEndReason`の意味は次のとおり。
+
+```text
+1. BANKRUPTCY   : score < rules.bankruptcy_threshold（<=ではない）。
+                  局位置に関係なく最優先。
+2. FINAL_ROUND  : 西4は親継続の有無・dealer stop条件に関わらず必ず最大局。
+3. DEALER_WIN /
+   DEALER_TENPAI: 南4・西1〜3で、親が起家順tie-break込み1位かつ
+                  first_place_target_points以上で継続する場合の停止条件
+                  （それぞれdealer_win_end_enabled /
+                    dealer_tenpai_end_enabledに従う）。
+4. TARGET_REACHED: 南4・西1〜3で親が流れ、誰かがfirst_place_target_points
+                   以上に達した場合。
+5. 南4で親が流れ誰も未達なら、west_round_enabledに応じてNone（西入）
+   またはFINAL_ROUND。
+6. 西1〜3で親が流れ誰も未達ならNone（次のWest handへ進む）。
+```
+
+`rules.return_points`（最終score / オカ計算専用の値）はmatch終了判定へ
+一切使用しない。使用するのは常に`rules.first_place_target_points`である。
+この2つのfieldは意味も用途も異なる別概念であり、値がたまたま一致する
+presetがあっても、match進行判定は`first_place_target_points`だけを
+参照する。
+
 ## Determinism
 
 engineのテスト・回帰確認・AI評価へ利用できるよう、同じversion、`RuleSet`、seed、入力系列から
@@ -415,8 +562,31 @@ seed: int -> RandomSource -> shuffled Wall
 ```
 
 `RandomSource` はseedから決定的に生成されるengine-ownedな乱数sourceであり、
-`Wall`自身はseed管理責務を持たない。半荘seedと局seedの配分規則はまだ固定せず、
-Match層で確定する。
+`Wall`自身はseed管理責務を持たない。
+
+match seedから各局のround seedを導出する規則は、`round_allocation.py`
+（Issue #24第1段階）で確定している。
+
+```text
+match seed + 1-based round ordinal
+    -> SHA-256 domain-separated derivation
+    -> round seed
+    -> RandomSource(round_seed)
+    -> create_shuffled_wall(...)
+    -> Wall
+```
+
+`derive_round_seed(match_seed, round_ordinal)` は、Pythonの
+`hash()`（process間で不安定）へ依存せず、stdlibの`hashlib.sha256`だけを
+使ったpureな導出である。同じ`match_seed` + 同じ`round_ordinal`からは常に
+同じround seedを得る。連荘で場・局・本場が同じ`RoundPosition`が続いても、
+ordinalが増えれば別のround seed・別のWallになる。
+
+`round_ordinal`は「何局目として実際に開始されたか」を表すfactであり、その
+保持・incrementはMatchState（F2）の責務である。本moduleはmutableな
+allocation stateを持たず、次のordinalを自動的に決めるglobal counter等も
+持たない。`RoundRandomProvenance`は`match_seed` / `round_ordinal` /
+`round_seed`をimmutableに保持し、replay / artifactでの監査に使う。
 
 ## python-studyからの移行
 
