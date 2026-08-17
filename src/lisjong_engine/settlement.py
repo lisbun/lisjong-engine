@@ -4,17 +4,162 @@ from enum import Enum
 
 from lisjong_engine.points import SeatPoints
 from lisjong_engine.riichi_event import RiichiContribution
-from lisjong_engine.round_result import WinningPlayerResult, WinResult
+from lisjong_engine.round_result import (
+    AbortiveDrawReason,
+    AbortiveDrawResult,
+    ExhaustiveDrawResult,
+    WinningPlayerResult,
+    WinResult,
+)
 from lisjong_engine.rules import (
     MultipleRonAwardPolicy,
     RonResolutionPolicy,
     RuleSet,
 )
+from lisjong_engine.score import calculate_score
 from lisjong_engine.seat import Seat
 from lisjong_engine.win_context import WinMethod
 from lisjong_engine.wind import Wind
 
 _SEAT_ORDER = tuple(Seat)
+
+
+def _noten_penalty_transfers(
+    result: ExhaustiveDrawResult,
+    rules: RuleSet,
+) -> tuple[SettlementTransfer, ...]:
+    tenpai_seats = frozenset(result.tenpai_seats)
+    tenpai_count = len(tenpai_seats)
+
+    if tenpai_count in (0, rules.player_count):
+        return ()
+
+    noten_seats = tuple(seat for seat in _SEAT_ORDER if seat not in tenpai_seats)
+    recipients = tuple(seat for seat in _SEAT_ORDER if seat in tenpai_seats)
+
+    total = rules.noten_penalty_total
+
+    if total % len(noten_seats):
+        raise ValueError("noten penalty total must be divisible among noten seats")
+    if total % len(recipients):
+        raise ValueError("noten penalty total must be divisible among tenpai seats")
+
+    payer_total = total // len(noten_seats)
+    recipient_total = total // len(recipients)
+
+    base_amount, remainder_per_payer = divmod(
+        payer_total,
+        len(recipients),
+    )
+
+    amounts = {
+        (payer, recipient): base_amount
+        for payer in noten_seats
+        for recipient in recipients
+    }
+
+    remaining_by_recipient = {
+        recipient: recipient_total - base_amount * len(noten_seats)
+        for recipient in recipients
+    }
+
+    for payer in noten_seats:
+        remainder = remainder_per_payer
+        for recipient in _ordered_seats_after(
+            payer,
+            tenpai_seats,
+        ):
+            if remainder == 0:
+                break
+            if remaining_by_recipient[recipient] == 0:
+                continue
+
+            amounts[(payer, recipient)] += 1
+            remaining_by_recipient[recipient] -= 1
+            remainder -= 1
+
+        if remainder:
+            raise ValueError("noten penalty remainder cannot be distributed")
+
+    if any(remaining_by_recipient.values()):
+        raise ValueError("noten penalty recipient totals are inconsistent")
+
+    transfers = []
+    for payer in noten_seats:
+        for recipient in _ordered_seats_after(
+            payer,
+            tenpai_seats,
+        ):
+            amount = amounts[(payer, recipient)]
+            if amount:
+                transfers.append(
+                    SettlementTransfer(
+                        payer,
+                        recipient,
+                        amount,
+                        TransferReason.NOTEN_PENALTY,
+                    )
+                )
+
+    return tuple(transfers)
+
+
+def _nagashi_mangan_transfers(
+    result: ExhaustiveDrawResult,
+    *,
+    dealer_seat: Seat,
+    rules: RuleSet,
+) -> tuple[SettlementTransfer, ...]:
+    transfers = []
+
+    for winner_seat in _SEAT_ORDER:
+        if winner_seat not in result.nagashi_mangan_seats:
+            continue
+
+        score = calculate_score(
+            han=5,
+            fu=20,
+            method=WinMethod.TSUMO,
+            is_dealer=winner_seat is dealer_seat,
+            rules=rules,
+        )
+
+        for payer_seat in _SEAT_ORDER:
+            if payer_seat is winner_seat:
+                continue
+
+            payment = (
+                score.tsumo_dealer_payment
+                if payer_seat is dealer_seat
+                else score.tsumo_non_dealer_payment
+            )
+            assert payment is not None
+
+            transfers.append(
+                SettlementTransfer(
+                    payer_seat,
+                    winner_seat,
+                    payment,
+                    TransferReason.NAGASHI_MANGAN,
+                    winner_seat,
+                )
+            )
+
+    return tuple(transfers)
+
+
+def _ordered_seats_after(
+    origin: Seat,
+    target_seats: frozenset[Seat],
+) -> tuple[Seat, ...]:
+    origin_index = _SEAT_ORDER.index(origin)
+
+    return tuple(
+        seat
+        for distance in range(1, len(_SEAT_ORDER))
+        if (seat := _SEAT_ORDER[(origin_index + distance) % len(_SEAT_ORDER)])
+        in target_seats
+    )
 
 
 class TransferReason(Enum):
@@ -240,6 +385,69 @@ def calculate_single_win_settlement_transfers(
         honba=honba,
         rules=rules,
     )
+
+
+def calculate_exhaustive_draw_settlement_transfers(
+    result: ExhaustiveDrawResult,
+    *,
+    dealer_seat: Seat | None = None,
+    rules: RuleSet | None = None,
+) -> tuple[SettlementTransfer, ...]:
+    """通常流局のnoten penaltyまたは流し満貫transferを計算する。"""
+    if not isinstance(result, ExhaustiveDrawResult):
+        raise TypeError("result must be an ExhaustiveDrawResult")
+    if dealer_seat is not None and not isinstance(dealer_seat, Seat):
+        raise TypeError("dealer_seat must be a Seat or None")
+
+    if rules is None:
+        rules = RuleSet.default()
+    elif not isinstance(rules, RuleSet):
+        raise TypeError("rules must be a RuleSet")
+
+    if result.nagashi_mangan_seats:
+        if not rules.nagashi_mangan_enabled:
+            raise ValueError("nagashi mangan is disabled by the rules")
+        if dealer_seat is None:
+            raise ValueError("dealer_seat is required for nagashi mangan settlement")
+        return _nagashi_mangan_transfers(
+            result,
+            dealer_seat=dealer_seat,
+            rules=rules,
+        )
+
+    return _noten_penalty_transfers(result, rules)
+
+
+def calculate_abortive_draw_settlement_transfers(
+    result: AbortiveDrawResult,
+    *,
+    rules: RuleSet | None = None,
+) -> tuple[SettlementTransfer, ...]:
+    """途中流局のplayer間transferを返す。
+
+    途中流局そのものには通常のplayer間点数移動はない。
+    成立済みriichi contributionは上位RoundSettlementで別途扱う。
+    """
+    if not isinstance(result, AbortiveDrawResult):
+        raise TypeError("result must be an AbortiveDrawResult")
+
+    if rules is None:
+        rules = RuleSet.default()
+    elif not isinstance(rules, RuleSet):
+        raise TypeError("rules must be a RuleSet")
+
+    enabled = {
+        AbortiveDrawReason.NINE_TERMINALS: (rules.nine_terminals_abortive_draw_enabled),
+        AbortiveDrawReason.FOUR_WINDS: (rules.four_winds_abortive_draw_enabled),
+        AbortiveDrawReason.FOUR_KANS: (rules.four_kans_abortive_draw_enabled),
+        AbortiveDrawReason.FOUR_RIICHI: (rules.four_riichi_abortive_draw_enabled),
+        AbortiveDrawReason.TRIPLE_RON: rules.triple_ron_abortive_draw,
+    }[result.reason]
+
+    if not enabled:
+        raise ValueError("abortive draw reason is disabled by the rules")
+
+    return ()
 
 
 def aggregate_settlement_transfers(
