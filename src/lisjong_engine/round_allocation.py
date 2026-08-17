@@ -67,10 +67,8 @@ def derive_round_seed(match_seed: int, round_ordinal: int) -> int:
 class RoundRandomProvenance:
     """1局分のrandom provenance。replay / artifactで局の乱数由来を追跡できる。
 
-    ``round_seed`` は常に ``derive_round_seed(match_seed, round_ordinal)`` の
-    結果と一致する。本classはこの一致を強制するcreate helperの利用を推奨し、
-    この関係自体はここでは検証しない（``round_seed`` を独立して保持する
-    monotonicなvalue型として扱うため）。
+    ``match_seed`` / ``round_ordinal`` / ``round_seed`` の整合性はvalue object
+    自身が保証する。
     """
 
     match_seed: int
@@ -82,6 +80,15 @@ class RoundRandomProvenance:
         _validate_round_ordinal(self.round_ordinal)
         if type(self.round_seed) is not int:
             raise TypeError("round_seed must be an int")
+
+        expected_round_seed = derive_round_seed(
+            self.match_seed,
+            self.round_ordinal,
+        )
+        if self.round_seed != expected_round_seed:
+            raise ValueError(
+                "round_seed must match derive_round_seed(match_seed, round_ordinal)"
+            )
 
 
 def create_round_random_provenance(

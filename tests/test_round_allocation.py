@@ -99,6 +99,18 @@ class RoundRandomProvenanceTest(unittest.TestCase):
                 round_seed="1",
             )
 
+    def test_rejects_round_seed_inconsistent_with_match_seed_and_ordinal(
+        self,
+    ) -> None:
+        derived = derive_round_seed(1, 1)
+
+        with self.assertRaises(ValueError):
+            RoundRandomProvenance(
+                match_seed=1,
+                round_ordinal=1,
+                round_seed=derived + 1,
+            )
+
 
 class CreateRoundWallTest(unittest.TestCase):
     def test_same_provenance_produces_the_same_wall(self) -> None:
