@@ -429,7 +429,7 @@ class FinalScoreModelTest(unittest.TestCase):
             FinalScoreCalculation((player,))
 
     def test_accepts_standard_competition_ranking_with_ties(self) -> None:
-        """ 同点者が順位帯の先頭順位を共有する標準競技順位
+        """同点者が順位帯の先頭順位を共有する標準競技順位
         （例: 1位・2位同点なら双方rank=1、次点はrank=3）を受け入れる。
         """
         players = (
@@ -469,7 +469,6 @@ class FinalScoreModelTest(unittest.TestCase):
 
 
 class SplitRankPointsTest(unittest.TestCase):
-
     def _rules(self):
         return replace(
             _DEFAULT_RULES,

@@ -81,7 +81,9 @@ class FinalScoreCalculation:
                 "players must be ordered by standard competition ranking "
                 "(ties share the group's starting rank, e.g. (1, 1, 3, 4))"
             )
-        if len(players) != len(Seat) or {player.seat for player in players} != set(Seat):
+        if len(players) != len(Seat) or {player.seat for player in players} != set(
+            Seat
+        ):
             raise ValueError("players must contain each seat exactly once")
         if sum(player.final_points for player in players) != 0:
             raise ValueError("final points must sum to zero")
