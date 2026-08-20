@@ -7,8 +7,9 @@ Personal Japanese riichi mahjong game engine.
 `lisjong-engine` は、日本式リーチ麻雀そのものを正しく動かすための個人開発ゲームエンジンです。
 AIの強さや戦略ではなく、ルール判定、状態管理、合法手、和了・点数計算、局・ゲーム進行を担当します。
 
-現在は初期開発段階です。まずPython package、test、CI、責務境界を整備し、その後
-`python-study` に残っている麻雀基盤を棚卸しして選択的に移行します。
+現在は、指定された`RuleSet`とdeterministicな入力のもとで、seat-specificな観測・公開action選択境界を通じて半荘を最終結果まで進行できる、v0.1相当の基礎engineが成立しています。
+現在実装済みの具体的なengine contractは[`docs/architecture.md`](docs/architecture.md)、post-v0.1の長期的な発展方向は[`docs/roadmap.md`](docs/roadmap.md)を参照してください。
+現在の作業進捗・完了条件はGitHub Issues / Pull Requestsを正本とします。
 
 lisjong ecosystem全体のrepository責務、repository間依存方向、長期ロードマップは
 [`lisjong-project`](https://github.com/lisbun/lisjong-project) を正本とします。
@@ -55,7 +56,7 @@ lisjong-engine -X-> lisjong
 - 麻雀ルール機構と個別設定を`RuleSet`で分離する
 - deterministicなgame実行と再現性を重視する
 - 未確認のRiichiLab等の固有ルールを推測で実装しない
-- `python-study` のコードは単純コピーせず、棚卸し後に現在採用する設計だけを移行する
+- 初期移行時の`python-study`棚卸し・設計判断は[`docs/python-study-migration.md`](docs/python-study-migration.md)を参照する
 
 ## 開発環境
 
@@ -85,10 +86,9 @@ python -m unittest discover -s tests -v
 
 ## ロードマップ
 
-最初の到達目標候補は、指定された`RuleSet`に従い、4人日本式リーチ麻雀の半荘を
-合法手だけで開始から最終結果まで決定的に完走できることです。
+v0.1相当の基礎完成後は、現在のrule-correct / deterministicなgame executionを維持しながら、validation、recordability support、consumer / interoperability readiness、performance、RuleSet evolution等を具体的なuse caseに応じて成熟させます。
 
-現在の進捗・完了条件はGitHub Issuesを正本とします。
+長期的な方向は[`docs/roadmap.md`](docs/roadmap.md)、現在の実装contractは[`docs/architecture.md`](docs/architecture.md)、進行中の作業はGitHub Issues / Pull Requestsを参照してください。
 
 ## License
 
