@@ -126,6 +126,11 @@ implementation / testを移行実績の証拠として使う。
 最終削除前に、`python-study` 内の残存依存、engine以外のconsumer、他repositoryへの
 移行状況、将来利用・廃止方針を確認する。
 
+個別ledgerの `Relevant test` は、現在のengine側でmigration判定の証拠として確認した
+testを示す。`—` は「test不要」ではなく、engine責務外・consumer依存・未採用contract等の
+理由でcurrent engine testをmigration evidenceとして紐付けないことを示す。`Notes` には、
+特に `superseded` / `partial` / `—` / readiness例外の判定理由を残す。
+
 ## Responsibility boundary
 
 engineが担うのは、日本リーチ麻雀を正しく進行するためのrule / state /
@@ -172,18 +177,18 @@ engineに含めない主な関心は次のとおり。
 
 ### Domain model
 
-| Source | Responsibility | Dest | Reuse | Migration state | Current replacement / evidence | Cleanup readiness |
-| --- | --- | --- | --- | --- | --- | --- |
-| `tile.py` | 牌種・物理牌・34種/136枚ID・赤5 | engine | A | `migrated` | `src/lisjong_engine/tile.py`, `tests/test_tile.py` | `ready for cleanup review` |
-| `seat.py` | 固定席 | engine | A | `migrated` | `src/lisjong_engine/seat.py`、上位state/testで使用 | `ready for cleanup review` |
-| `wind.py` | 場風・自風 | engine | A | `migrated` | `src/lisjong_engine/wind.py` | `ready for cleanup review` |
-| `hand.py` | 手牌集合・物理牌ownership | engine | A | `migrated` | `src/lisjong_engine/hand.py`, current round tests | `ready for cleanup review` |
-| `discard.py` | 捨て牌・河・鳴かれ記録 | engine | A | `migrated` | `src/lisjong_engine/discard.py`, `tests/test_discard.py` | `ready for cleanup review` |
-| `meld.py` | ポン・チー・槓 | engine | A | `migrated` | `src/lisjong_engine/meld.py`, meld / round tests | `ready for cleanup review` |
-| `wall.py` | live wall・dead wall・嶺上・表示牌 | engine | A | `migrated` | `src/lisjong_engine/wall.py` + deterministic `random_source.py` | `ready for cleanup review` |
-| `round_phase.py` | 局内phase | engine | A | `migrated` | `src/lisjong_engine/round_phase.py` | `ready for cleanup review` |
-| `settlement.py` | 点数移動・供託授与の値型 | engine | A | `migrated` | `src/lisjong_engine/settlement.py`。値型だけでなく精算logicも集約 | `ready for cleanup review` |
-| `furiten.py` | 振聴理由enum | engine | A | `migrated` | `src/lisjong_engine/furiten.py` + `player_state.py` | `ready for cleanup review` |
+| Source | Responsibility | Dest | Reuse | Migration state | Current replacement | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tile.py` | 牌種・物理牌・34種/136枚ID・赤5 | engine | A | `migrated` | `src/lisjong_engine/tile.py` | `tests/test_tile.py` | `ready for cleanup review` | 物理牌ID・34種ID・赤5の主要contractを維持 |
+| `seat.py` | 固定席 | engine | A | `migrated` | `src/lisjong_engine/seat.py` | `tests/test_seat.py` | `ready for cleanup review` | 固定4席の値contractを維持 |
+| `wind.py` | 場風・自風 | engine | A | `migrated` | `src/lisjong_engine/wind.py` | `tests/test_wind.py` | `ready for cleanup review` | 風の値contractを維持 |
+| `hand.py` | 手牌集合・物理牌ownership | engine | A | `migrated` | `src/lisjong_engine/hand.py` | `tests/test_hand.py` | `ready for cleanup review` | 物理牌ownershipをcore内部で維持 |
+| `discard.py` | 捨て牌・河・鳴かれ記録 | engine | A | `migrated` | `src/lisjong_engine/discard.py` | `tests/test_discard.py` | `ready for cleanup review` | 河・鳴かれ状態のcontractを維持 |
+| `meld.py` | ポン・チー・槓 | engine | A | `migrated` | `src/lisjong_engine/meld.py` | `tests/test_meld.py` | `ready for cleanup review` | 副露variantと物理牌構成を維持 |
+| `wall.py` | live wall・dead wall・嶺上・表示牌 | engine | A | `migrated` | `src/lisjong_engine/wall.py` + `random_source.py` | `tests/test_wall.py`, `tests/test_random_source.py` | `ready for cleanup review` | 旧wall contractにdeterministic random sourceを追加 |
+| `round_phase.py` | 局内phase | engine | A | `migrated` | `src/lisjong_engine/round_phase.py` | `tests/test_round_phase.py` | `ready for cleanup review` | current state machineでphase contractを維持 |
+| `settlement.py` | 点数移動・供託授与の値型 | engine | A | `migrated` | `src/lisjong_engine/settlement.py` | `tests/test_settlement.py`, `tests/test_win_settlement.py`, `tests/test_draw_settlement.py` | `ready for cleanup review` | 値型に加えpure settlement logicも集約 |
+| `furiten.py` | 振聴理由enum | engine | A | `migrated` | `src/lisjong_engine/furiten.py` + `player_state.py` | `tests/test_furiten.py`, `tests/test_player_state.py` | `ready for cleanup review` | 振聴理由とplayer状態への反映を維持 |
 
 P1では旧domain modelを移行しただけでなく、旧sourceに正式contractがなかった
 `RandomSource` / deterministic wall generationも新規に追加した。これは旧資産の
@@ -191,17 +196,17 @@ cleanupを妨げるものではない。
 
 ### Winning / scoring
 
-| Source | Responsibility | Dest | Reuse | Migration state | Current replacement / evidence | Cleanup readiness |
-| --- | --- | --- | --- | --- | --- | --- |
-| `winning.py` | 和了形解析・待ち形 | engine | A | `migrated` | `winning.py`, `tests/test_winning.py` | `ready for cleanup review` |
-| `win_context.py` | 和了時点のimmutable入力fact | engine | A | `migrated` | `win_context.py` | `ready for cleanup review` |
-| `interpretation_analysis.py` | 面子分解の意味解析 | engine | A | `migrated` | `interpretation_analysis.py` + scoring tests | `ready for cleanup review` |
-| `yaku.py` | Yaku identifier + 役判定 + `YakuRules` | engine | A/B | `superseded` | `yaku.py`（identifier）+ `yaku_evaluation.py`（判定）+ `rules.py`（設定） | `ready for cleanup review` |
-| `fu.py` | 符計算 + `FuRules` | engine | A/B | `migrated` | `fu.py`; `FuRules`設定は`RuleSet`へ統合 | `ready for cleanup review` |
-| `dora.py` | 表・裏・カンドラ計数 | engine | A | `migrated` | `dora.py`, `tests/test_dora.py` | `ready for cleanup review` |
-| `hand_value.py` | 翻・符の統合評価 | engine | A | `migrated` | `hand_value.py` | `ready for cleanup review` |
-| `score.py` | 基本点・親子別支払 | engine | A | `migrated` | `score.py` + `RuleSet` | `ready for cleanup review` |
-| `winning_score.py` | 複数解釈の候補列挙・最大選択 | engine | A | `migrated` | `winning_score.py`。同点候補保持を維持 | `ready for cleanup review` |
+| Source | Responsibility | Dest | Reuse | Migration state | Current replacement | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `winning.py` | 和了形解析・待ち形 | engine | A | `migrated` | `winning.py` | `tests/test_winning.py` | `ready for cleanup review` | 通常形・七対子・国士等の解析contractを維持 |
+| `win_context.py` | 和了時点のimmutable入力fact | engine | A | `migrated` | `win_context.py` | `tests/test_win_context.py` | `ready for cleanup review` | scoring入力factをimmutable boundaryとして維持 |
+| `interpretation_analysis.py` | 面子分解の意味解析 | engine | A | `migrated` | `interpretation_analysis.py` | `tests/test_interpretation_analysis.py` | `ready for cleanup review` | 面子解釈の分析責務を維持 |
+| `yaku.py` | Yaku identifier + 役判定 + `YakuRules` | engine | A/B | `superseded` | `yaku.py` + `yaku_evaluation.py` + `rules.py` | `tests/test_yaku.py`, `tests/test_yaku_evaluation.py`, `tests/test_rules.py` | `ready for cleanup review` | identifier・判定・設定へ意図的に責務分割 |
+| `fu.py` | 符計算 + `FuRules` | engine | A/B | `migrated` | `fu.py` + `RuleSet` | `tests/test_fu.py`, `tests/test_rules.py` | `ready for cleanup review` | 符計算は維持し設定だけ`RuleSet`へ統合 |
+| `dora.py` | 表・裏・カンドラ計数 | engine | A | `migrated` | `dora.py` | `tests/test_dora.py` | `ready for cleanup review` | indicator / ura / kan dora contractを維持 |
+| `hand_value.py` | 翻・符の統合評価 | engine | A | `migrated` | `hand_value.py` | `tests/test_hand_value.py` | `ready for cleanup review` | hand valueの統合contractを維持 |
+| `score.py` | 基本点・親子別支払 | engine | A | `migrated` | `score.py` + `RuleSet` | `tests/test_score.py`, `tests/test_rules.py` | `ready for cleanup review` | rule設定を注入しつつ得点contractを維持 |
+| `winning_score.py` | 複数解釈の候補列挙・最大選択 | engine | A | `migrated` | `winning_score.py` | `tests/test_winning_score.py` | `ready for cleanup review` | 最大候補選択と同点候補保持を維持 |
 
 現行architectureでも、得点評価層は `RoundState` から独立したpure layerであり、
 成立役、翻・役満倍率、符・ドラ内訳を監査可能な形で保持する。この点は初回inventory
@@ -209,14 +214,14 @@ cleanupを妨げるものではない。
 
 ### Legal actions / round state
 
-| Source | Responsibility | Dest | Reuse | Migration state | Current replacement / evidence | Cleanup readiness |
-| --- | --- | --- | --- | --- | --- | --- |
-| `legal_action.py` | internal合法手domain値・snapshot | engine | A | `migrated` | `legal_action.py` + `legal_actions.py`; state revisionでstale snapshotを拒否 | `ready for cleanup review` |
-| `reaction.py` | 捨て牌・加槓・暗槓への反応とpriority | engine | A/B | `superseded` | `reaction.py` + `reaction_boundary.py` + `kan.py` + `ron_legality.py`; batch atomic resolutionへ再設計 | `ready for cleanup review` |
-| `riichi_event.py` | 立直宣言と成立確定 | engine | A | `migrated` | `riichi_event.py` + `round_state.py`; contribution factとscore authorityを分離 | `ready for cleanup review` |
-| `round_event.py` | 局内objective event log | engine | A/B | `migrated` | `round_event.py`; external canonical recordとは分離 | `ready for cleanup review` |
-| `round_result.py` | 和了・荒牌・途中流局結果 | engine | A | `migrated` | `round_result.py` + `winning_finalization.py` + `draw_resolution.py` | `ready for cleanup review` |
-| `round_state.py` | 1局の巨大状態機械 | engine | B | `superseded` | `round_state.py` + `player_state.py` + `legal_actions.py` + `reaction.py` + `kan.py` + `draw_resolution.py` + `winning_finalization.py`; pull API / revision / transactional mutationを採用 | `ready for cleanup review` |
+| Source | Responsibility | Dest | Reuse | Migration state | Current replacement | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `legal_action.py` | internal合法手domain値・snapshot | engine | A | `migrated` | `legal_action.py` + `legal_actions.py` | `tests/test_legal_action.py`, `tests/test_legal_actions.py` | `ready for cleanup review` | stale snapshot拒否をrevision contractとして追加 |
+| `reaction.py` | 捨て牌・加槓・暗槓への反応とpriority | engine | A/B | `superseded` | `reaction.py` + `reaction_boundary.py` + `kan.py` + `ron_legality.py` | `tests/test_reaction.py`, `tests/test_reaction_boundary.py`, `tests/test_kan.py`, `tests/test_ron_legality.py` | `ready for cleanup review` | batch atomic resolutionへ責務を再構成 |
+| `riichi_event.py` | 立直宣言と成立確定 | engine | A | `migrated` | `riichi_event.py` + `round_state.py` | `tests/test_riichi_event.py`, `tests/test_round_state.py` | `ready for cleanup review` | contribution factとscore authorityを分離しつつ契約維持 |
+| `round_event.py` | 局内objective event log | engine | A/B | `migrated` | `round_event.py` | `tests/test_round_event.py` | `ready for cleanup review` | objective factは維持しexternal canonical recordとは分離 |
+| `round_result.py` | 和了・荒牌・途中流局結果 | engine | A | `migrated` | `round_result.py` + `winning_finalization.py` + `draw_resolution.py` | `tests/test_round_result.py`, `tests/test_winning_finalization.py`, `tests/test_draw_resolution.py` | `ready for cleanup review` | terminal result責務をfinalization/resolutionへ分割 |
+| `round_state.py` | 1局の巨大状態機械 | engine | B | `superseded` | `round_state.py` + `player_state.py` + `legal_actions.py` + `reaction.py` + `kan.py` + `draw_resolution.py` + `winning_finalization.py` | `tests/test_round_state.py`, `tests/test_round_winning.py`, `tests/test_round_draw.py` | `ready for cleanup review` | pull API / revision / transactional mutationを採用したmany-to-many置換 |
 
 旧 `round_state.py` は単一file 2,980行で、状態機械、PlayerState、合法手生成、
 反応解決、和了確定等を抱えていた。現在は責務を複数moduleへ分割しつつ、
@@ -225,10 +230,10 @@ cleanupを妨げるものではない。
 
 ### Rules
 
-| Source | Responsibility | Dest | Reuse | Migration state | Current replacement / evidence | Cleanup readiness |
-| --- | --- | --- | --- | --- | --- | --- |
-| `rules.py` | `MahjongRules` + policy enum + external preset data | engine | B | `superseded` | 単一frozen `RuleSet` + policy enum + `RuleSet.default()` + `docs/rules.md` | `retain as migration source` |
-| `rule_preset.py` | `MahjongRules` / `YakuRules` / `FuRules`の束ね直し | engine | C/D | `superseded` | `RuleSet`へ統合しbundle型を廃止 | `ready for cleanup review` |
+| Source | Responsibility | Dest | Reuse | Migration state | Current replacement | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `rules.py` | `MahjongRules` + policy enum + external preset data | engine | B | `superseded` | frozen `RuleSet` + policy enum + `RuleSet.default()` + `docs/rules.md` | `tests/test_rules.py` | `retain as migration source` | current default contractは置換済みだが旧external preset data / evidenceは未退避 |
+| `rule_preset.py` | `MahjongRules` / `YakuRules` / `FuRules`の束ね直し | engine | C/D | `superseded` | `RuleSet` | `tests/test_rules.py` | `ready for cleanup review` | bundle型を廃止し単一設定contractへ統合 |
 
 `rules.py` のcurrent engine contract自体は `RuleSet` により置換済みである。
 ただし初回inventoryで価値を認めた天鳳・雀魂・Mリーグ等のexternal preset値は、
@@ -241,15 +246,15 @@ concrete use case drivenとするため、**旧preset data / source referenceを
 
 ### Match / settlement
 
-| Source | Responsibility | Dest | Reuse | Migration state | Current replacement / evidence | Cleanup readiness |
-| --- | --- | --- | --- | --- | --- | --- |
-| `match_state.py` | 半荘状態機械 + 精算計算 | engine | B | `superseded` | `match_state.py` + `settlement.py` + `round_allocation.py`; Matchがscore authorityを保持 | `ready for cleanup review` |
-| `final_score.py` | 順位・ウマ・オカ・端数・飛び賞 | engine | A | `migrated` | `final_score.py`, `tests/test_final_score.py` | `ready for cleanup review` |
-| `match/initial_state.py` | historical Replay用の局開始状態 | python-study | C | `—` | deterministic executionとは別のhistorical replay concern | `needs decision` |
-| `match/record.py` | `RoundRecord` / `MatchRecord` | lisjong | C | `—` | current engineはobjective factsを保持するがcanonical `GameRecord`は所有しない | `needs decision` |
-| `match/terminal_delivery_record.py` | Player終端配送の監査 | lisjong | D | `—` | Player delivery contractはengine責務外 | `needs decision` |
-| `match/terminal_event_projection.py` | 終端factの席別event射影 | engine（一部） | C | `not migrated` | current result / observationで一部責務は満たすが、差分delivery contract自体は未採用 | `needs decision` |
-| `match/controller.py` | Playerを駆動する半荘orchestration | engine（縮小） | B/C | `superseded` | `driver.py` + `match_state.py` + `action_projection.py`; external selectorを呼ぶ最小driver | `ready for cleanup review` |
+| Source | Responsibility | Dest | Reuse | Migration state | Current replacement | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `match_state.py` | 半荘状態機械 + 精算計算 | engine | B | `superseded` | `match_state.py` + `settlement.py` + `round_allocation.py` | `tests/test_match_state.py`, `tests/test_settlement.py`, `tests/test_round_allocation.py` | `ready for cleanup review` | Matchをscore authorityとしpure settlement / seed allocationを分離 |
+| `final_score.py` | 順位・ウマ・オカ・端数・飛び賞 | engine | A | `migrated` | `final_score.py` | `tests/test_final_score.py` | `ready for cleanup review` | final score契約をcurrent RuleSet下で維持 |
+| `match/initial_state.py` | historical Replay用の局開始状態 | python-study | C | `—` | current engine replacementなし | `—` | `needs decision` | historical replay concernでありdeterministic executionとは別能力 |
+| `match/record.py` | `RoundRecord` / `MatchRecord` | lisjong | C | `—` | current engine replacementなし | `—` | `needs decision` | canonical `GameRecord`はcurrent engine責務として固定していない |
+| `match/terminal_delivery_record.py` | Player終端配送の監査 | lisjong | D | `—` | current engine replacementなし | `—` | `needs decision` | Player delivery contractはengine責務外 |
+| `match/terminal_event_projection.py` | 終端factの席別event射影 | engine（一部・保留） | C | `—` | current result / observationが一部factを提供 | `tests/test_round_result.py`, `tests/test_observation_builder.py` | `needs decision` | 差分deliveryはcurrent必須engine contractではなく、具体consumerで必要性を再評価 |
+| `match/controller.py` | Playerを駆動する半荘orchestration | engine（縮小） | B/C | `superseded` | `driver.py` + `match_state.py` + `action_projection.py` | `tests/test_driver.py`, `tests/test_match_state.py` | `ready for cleanup review` | push型Player orchestrationをexternal selector型driverへ置換 |
 
 `match_state.py` の旧「状態機械＋pure settlement」の混在は、current engineで
 `match_state.py` と `settlement.py` へ明確化された。さらに半荘seedから局seedを
@@ -258,22 +263,22 @@ engine contractとして確立した。
 
 ### Game-layer gray zones
 
-| Source | Responsibility | Initial dest | Reuse | Migration state | Current replacement / evidence | Cleanup readiness |
-| --- | --- | --- | --- | --- | --- | --- |
-| `game/public_state.py` | 公開河・副露等のpublic値型 | engine | B | `migrated` | `public_state.py` | `ready for cleanup review` |
-| `game/observation.py` | `PlayerObservation` + action options | engine | B | `superseded` | `SeatObservation` (`observation.py`)。action boundaryを分離しphysical IDを非公開化 | `ready for cleanup review` |
-| `game/observation_builder.py` | 席別snapshot射影 | engine | B | `superseded` | `observation_builder.py`; Match + active Roundからpure projectionしhidden情報をfail closedで除外 | `ready for cleanup review` |
-| `game/player.py` | `Player` ABC | engine（概念のみ） | C | `superseded` | engineはPlayer hierarchyを所有せず、driverがseat-specific selector callableを受ける | `ready for cleanup review` |
-| `game/controller.py` | push型1局Player loop | engine（縮小） | B/C | `superseded` | `RoundState.legal_actions/apply/resolve_reactions` + `driver.py` | `ready for cleanup review` |
-| `game/action_descriptor.py` | physical IDを隠した合法手表現 | engine | C | `superseded` | current `action_descriptor.py` + `action_projection.py`; initial planの「不要かもしれない」判断から設計が進化 | `ready for cleanup review` |
-| `game/action_translation.py` | process-global action_id ↔ internal action | 廃止 | D | `superseded` | process-global IDは採用せず、snapshot-local public descriptor → canonical action解決へ置換 | `needs decision` |
-| `game/player_visible_event.py` | 席別差分event union | engine（保留） | C | `not migrated` | current v0.1ではsnapshot observationを採用。record / replay / interoperability PoCで必要性を再評価 | `needs decision` |
-| `game/visible_event_translation.py` | `RoundEventLog` → 席別差分event | engine（保留） | C | `not migrated` | 同上 | `needs decision` |
-| `game/decision.py` | DecisionRecord / DecisionLog | lisjong | D | `—` | AI / learning / audit側の関心 | `needs decision` |
-| `game/decision_input.py` | observation + 差分event入力 | lisjong | D | `—` | Player / Policy integration側の関心 | `needs decision` |
-| `game/event_input.py` | Decision外event delivery batch | lisjong | D | `—` | engineはPlayer delivery contractを所有しない | `needs decision` |
-| `game/human_player.py` | CLI向けPlayer | python-study | D | `—` | Human Play / UI側の関心 | `needs decision` |
-| `game/random_player.py` | random意思決定主体 | lisjong / python-study | C | `—` | engineはPolicyを所有しない。seed明示・決定的test手法だけcurrent testsへ反映 | `needs decision` |
+| Source | Responsibility | Initial dest | Reuse | Migration state | Current replacement | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `game/public_state.py` | 公開河・副露等のpublic値型 | engine | B | `migrated` | `public_state.py` | `tests/test_public_state.py` | `ready for cleanup review` | public stateの値contractを維持 |
+| `game/observation.py` | `PlayerObservation` + action options | engine | B | `superseded` | `SeatObservation` (`observation.py`) | `tests/test_observation.py` | `ready for cleanup review` | action boundaryを分離しphysical IDをObservationから排除 |
+| `game/observation_builder.py` | 席別snapshot射影 | engine | B | `superseded` | `observation_builder.py` | `tests/test_observation_builder.py` | `ready for cleanup review` | Match + active Roundからpure projectionしhidden情報をfail closedで除外 |
+| `game/player.py` | `Player` ABC | engine（概念のみ） | C | `superseded` | `driver.py` のseat-specific selector callable | `tests/test_driver.py` | `ready for cleanup review` | engineはPlayer class hierarchyを所有しない設計へ確定 |
+| `game/controller.py` | push型1局Player loop | engine（縮小） | B/C | `superseded` | `RoundState` pull API + `driver.py` | `tests/test_round_state.py`, `tests/test_driver.py` | `ready for cleanup review` | rule priorityはcore resolverに残しorchestrationをthin化 |
+| `game/action_descriptor.py` | physical IDを隠した合法手表現 | engine | C | `superseded` | `action_descriptor.py` + `action_projection.py` | `tests/test_action_descriptor.py`, `tests/test_action_projection.py` | `ready for cleanup review` | initial planの不要判断から、public boundaryとして新contractへ再設計 |
+| `game/action_translation.py` | process-global action_id ↔ internal action | 廃止 | D | `superseded` | snapshot-local descriptor resolution | `tests/test_action_projection.py`, `tests/test_driver.py` | `needs decision` | process-global IDは廃止したが旧fileのengine外利用有無は後続cleanupで確認 |
+| `game/player_visible_event.py` | 席別差分event union | engine（保留） | C | `—` | current snapshot observation boundary | `tests/test_observation.py`, `tests/test_observation_builder.py` | `needs decision` | 差分eventはcurrent必須engine contractではなくrecord/replay/interoperability PoCで再評価 |
+| `game/visible_event_translation.py` | `RoundEventLog` → 席別差分event | engine（保留） | C | `—` | current snapshot observation boundary | `tests/test_observation_builder.py` | `needs decision` | differential delivery自体をv0.1 contractとして採用していないため`not migrated`とはしない |
+| `game/decision.py` | DecisionRecord / DecisionLog | lisjong | D | `—` | current engine replacementなし | `—` | `needs decision` | AI / learning / audit側の関心 |
+| `game/decision_input.py` | observation + 差分event入力 | lisjong | D | `—` | current engine replacementなし | `—` | `needs decision` | Player / Policy integration側の関心 |
+| `game/event_input.py` | Decision外event delivery batch | lisjong | D | `—` | current engine replacementなし | `—` | `needs decision` | engineはPlayer delivery contractを所有しない |
+| `game/human_player.py` | CLI向けPlayer | python-study | D | `—` | current engine replacementなし | `—` | `needs decision` | Human Play / UI側の関心 |
+| `game/random_player.py` | random意思決定主体 | lisjong / python-study | C | `—` | test-only selector pattern | `tests/test_driver.py` | `needs decision` | engineはPolicyを所有せず、seed明示・決定的test手法だけを引き継ぐ |
 
 特に `game/action_descriptor.py` は初回計画からの重要な設計変化である。
 初回は「internal `LegalAction` を直接公開できるなら不要」と評価したが、G1/G2の
@@ -287,12 +292,12 @@ engine contractとして確立した。
 以下はengineへ移行しない判断自体は維持するが、この文書だけで
 `python-study` からの削除可否を決めない。
 
-| Assets | Initial destination | Reuse | Current engine judgment | Cleanup readiness |
-| --- | --- | --- | --- | --- |
-| `game/mjai_protocol.py`, `game/mjai_adapter.py`, `game/mjai_process_transport.py`, `game/_mjai_test_bot.py` | lisjong | D | protocol / adapter / process transportはengine責務外 | `needs decision` |
-| `cli/main.py`, `cli/renderer.py`, `cli/action_chooser.py`, `cli/match_summary.py`, `cli/seat_display.py` | python-study | D | CLI / Human Play UIはengine責務外 | `needs decision` |
-| `decision_dataset.py` | lisjong | D | learning datasetはengine責務外 | `needs decision` |
-| `terminal_delivery_verification.py` | python-study | D | Player delivery監査はengine責務外 | `needs decision` |
+| Assets | Initial destination | Reuse | Current engine judgment | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `game/mjai_protocol.py`, `game/mjai_adapter.py`, `game/mjai_process_transport.py`, `game/_mjai_test_bot.py` | lisjong | D | protocol / adapter / process transportはengine責務外 | `—` | `needs decision` | engine migration stateを定義しない |
+| `cli/main.py`, `cli/renderer.py`, `cli/action_chooser.py`, `cli/match_summary.py`, `cli/seat_display.py` | python-study | D | CLI / Human Play UIはengine責務外 | `—` | `needs decision` | future Human Play側で保存・移行・廃止を判断 |
+| `decision_dataset.py` | lisjong | D | learning datasetはengine責務外 | `—` | `needs decision` | lisjong側の学習data contractと照合が必要 |
+| `terminal_delivery_verification.py` | python-study | D | Player delivery監査はengine責務外 | `—` | `needs decision` | delivery consumerの存否を後続auditで確認 |
 
 ## Replay / verification correction
 
@@ -320,13 +325,13 @@ current engineは deterministic executionを確立したが、それは「当時
 
 したがって次の資産は、**engine v0.1へ未移植だから不要**とは判定しない。
 
-| Source | Initial reuse | Post-migration judgment | Cleanup readiness |
-| --- | --- | --- | --- |
-| `replay_engine.py` | C | historical replay concern。current deterministic executionとは別 | `needs decision` |
-| `replay_projection.py` | C | replayからplayer-facing stateを再構成するconsumer concern | `needs decision` |
-| `decision_verification.py` | C | recorded decision / dataset品質保証。engine determinism testとは目的が異なる | `needs decision` |
-| `match/initial_state.py` | C | historical replayの初期evidence modelとして再評価対象 | `needs decision` |
-| `match/record.py` | C | record / replay / analysis consumer PoCで再評価 | `needs decision` |
+| Source | Initial reuse | Migration state | Post-migration judgment | Relevant test | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `replay_engine.py` | C | `—` | historical replay concern。current deterministic executionとは別 | `—` | `needs decision` | record / replay consumer PoCで必要性を評価 |
+| `replay_projection.py` | C | `—` | replayからplayer-facing stateを再構成するconsumer concern | `—` | `needs decision` | snapshot observationで代替済みとは判定しない |
+| `decision_verification.py` | C | `—` | recorded decision / dataset品質保証。engine determinism testとは目的が異なる | `—` | `needs decision` | lisjong / dataset側の監査contractと照合が必要 |
+| `match/initial_state.py` | C | `—` | historical replayの初期evidence modelとして再評価対象 | `—` | `needs decision` | deterministic initial state生成とは別のpersistence concern |
+| `match/record.py` | C | `—` | record / replay / analysis consumer PoCで再評価 | `—` | `needs decision` | canonical record schemaを先行固定しない |
 
 `roadmap.md` の Recordability Support に従い、巨大なcanonical `GameEvent` /
 `GameRecord` schemaを先行移植しない。まずcurrent engineのobjective factsを
@@ -356,21 +361,21 @@ minimum contractを追加する。
 
 ### Shared fixtures
 
-| Source | Initial reuse | Current evidence / judgment | Migration state | Cleanup readiness |
-| --- | --- | --- | --- | --- |
-| `_ankan_chankan_round_fixture.py` | B/C | explicit tile-name / wall constructionの考え方は `tests/_round_fixtures.py` に採用。旧record型は移さない。specific edge-case coverageは後続cleanupで照合する | `partial` | `retain as migration source` |
-| `_kakan_round_fixture.py` | C/D | RandomPlayerのseed探索に依存するfixture手法は採用しない。current testsは明示的な初期wall + public API駆動を基本とする | `superseded` | `ready for cleanup review` |
+| Source | Initial reuse | Current replacement / judgment | Relevant test | Migration state | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `_ankan_chankan_round_fixture.py` | B/C | explicit tile-name / wall constructionは `tests/_round_fixtures.py` に採用。旧record型は移さない | `tests/_round_fixtures.py`, `tests/test_kan.py`, `tests/test_round_winning.py` | `partial` | `retain as migration source` | fixture固有edge caseがcurrent testsへ全て対応したか最終照合が残る |
+| `_kakan_round_fixture.py` | C/D | RandomPlayer seed探索をやめ、明示的初期wall + public API駆動へ置換 | `tests/_round_fixtures.py`, `tests/test_kan.py`, `tests/test_round_state.py` | `superseded` | `ready for cleanup review` | fixture手法自体をdeterministic explicit setupへ置換済み |
 
 fixtureのcleanupでは「旧helper fileがあるか」ではなく、そのfixtureが唯一保持していた
 rule edge caseがcurrent testsで固定されているかを確認する。
 
 ## Document migration
 
-| Source | Initial reuse | Current replacement / judgment | Migration state | Cleanup readiness |
-| --- | --- | --- | --- | --- |
-| `python-study/docs/mahjong-rules.md` | B | `docs/rules.md` とcurrent implementation contractへ再構成 | `migrated` | `ready for cleanup review` |
-| `python-study/mahjong/README.md` | C | engine READMEへ丸ごと移さない。learning history / old runtime説明が混在 | `—` | `needs decision` |
-| `python-study/docs/mahjong-architecture.md` | C | engine知見は `architecture.md` / `rules.md` / 本ledgerへ抽出。lisjong・mjai・進捗履歴も混在 | `—` | `needs decision` |
+| Source | Initial reuse | Current replacement / judgment | Relevant test | Migration state | Cleanup readiness | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `python-study/docs/mahjong-rules.md` | B | `docs/rules.md` とcurrent implementation contractへ再構成 | `tests/test_rules.py` + rule/scoring/round tests | `migrated` | `ready for cleanup review` | engine rule contractはcurrent docs + implementation/testへ移行済み |
+| `python-study/mahjong/README.md` | C | engine READMEへ丸ごと移さない | `—` | `—` | `needs decision` | learning history / old runtime説明が混在 |
+| `python-study/docs/mahjong-architecture.md` | C | engine知見は `architecture.md` / `rules.md` / 本ledgerへ抽出 | `—` | `—` | `needs decision` | lisjong・mjai・進捗履歴も混在するためcross-repo判断が必要 |
 
 `python-study` 側の学習履歴を保持するか、active mahjong runtimeとしての記述を
 cleanupするかは、このIssueでは決めない。
