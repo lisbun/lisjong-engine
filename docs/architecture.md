@@ -235,6 +235,60 @@ visible riichi sticks
 Observationへaction ID、action option、physical `LegalAction`を埋め込まない。G1はdriver、
 selector、Player / Policy、action translationを持たず、既存pull APIも変更しない。
 
+### Public action descriptorと決定的最小driver
+
+外部callerが席ごとの意思決定を行いながら半荘を完走できるよう、G2では
+`SeatObservation`と内部`LegalActionSnapshot`の間に、物理牌identityを持たない
+immutableな`ActionDescriptor`境界を置く。
+
+```text
+MatchState + active RoundState
+        ├─ build_seat_observation() -> SeatObservation
+        └─ legal_actions()          -> LegalActionSnapshot（engine内部）
+                                            ↓ public projection / collapse
+                                  tuple[ActionDescriptor, ...]
+                                            ↓
+                             external seat-specific selector
+                                            ↓ snapshot-local resolve
+                                  canonical internal LegalAction
+                                            ↓
+                              RoundState.apply() / resolve_reactions()
+                                            ↓
+                                MatchState.settle_active_round()
+                                            ↓
+                                      CompletedMatch
+```
+
+driverはPolicyではなく、既存state machine APIを正しい順序で呼ぶorchestrationである。
+AI、RandomPlayer、牌効率等の選択logicは所有せず、4席それぞれのselectorをcallerから
+注入する。selectorへ渡すのは`SeatObservation`とpublic descriptorだけであり、raw
+`LegalAction`、physical tile ID、`RoundState` / `MatchState`、seed、random provenance、
+hidden wall情報は公開しない。
+
+同じ公開意味になる複数の内部actionは1 descriptorへcollapseする。適用する内部actionは
+physical tile IDを使う明示的なinternal keyで決定的に選ぶ一方、selectorへ提示するoption
+tupleはaction kind、`PublicTile`、tsumogiri、source seat、consumed public tiles等の公開情報
+だけを使う明示的なkeyでsortする。これにより、physical copyの割当だけが異なる同じ公開
+局面では、selectorが受け取るoption tuple全体も等しくなる。descriptorから内部actionへの
+解決はselector呼出前に取得した同じ`LegalActionSnapshot`のlocal mappingだけを使い、
+selector後に合法手を再取得しない。stale / legal membershipの最終検証は既存core APIへ委譲する。
+
+reaction windowでは、既存のreacting seat順に従いつつ、3席すべてのObservation、合法手
+snapshot、public options、local mappingをcallback開始前に構築する。その後に全selectorを
+呼び、全choiceを検証してから、shared revisionを指定した`resolve_reactions()`を1回だけ
+呼ぶ。Passしかない席もcallback対象であり、途中のselector exceptionやinvalid choiceでは
+driver自身はstateをmutationしない。Ron / Pon / Chi / Daiminkanのpriorityは既存resolverへ
+完全に委譲する。
+
+forced draw、嶺上draw、pending Ron finalization、局精算はそれぞれ既存`RoundState` /
+`MatchState` APIを呼ぶだけとし、driverは合法手導出、reaction priority、得点、流局、精算、
+連荘、終局条件、seed導出、Wall生成、Observation射影を再実装しない。validな
+`AWAITING_ROUND` / `ROUND_IN_PROGRESS`からresumeでき、`FINISHED`では既存
+`CompletedMatch`を返す。不整合な内部phaseを推測で補修しない。
+
+G2の決定的最小driver完了を、現在の移行ロードマップにおける`lisjong-engine` v0.1の
+到達点とする。
+
 ### 合法手導出と反応境界
 
 合法手の導出は状態mutationから分離したpure moduleに置き、`RoundState` 側は
