@@ -373,7 +373,7 @@ rule edge caseがcurrent testsで固定されているかを確認する。
 
 | Source | Initial reuse | Current replacement / judgment | Relevant test | Migration state | Cleanup readiness | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `python-study/docs/mahjong-rules.md` | B | `docs/rules.md` とcurrent implementation contractへ再構成 | `tests/test_rules.py` + rule/scoring/round tests | `migrated` | `ready for cleanup review` | engine rule contractはcurrent docs + implementation/testへ移行済み |
+| `python-study/docs/mahjong-rules.md` | B | `docs/rules.md` とcurrent implementation contractへ再構成 | `tests/test_rules.py` + rule/scoring/round tests | `partial` | `retain as migration source` | `project-standard-v1` のcurrent contractは移行済みだが、external preset provenance / 情報源 / 一部のルール決定履歴は未退避 |
 | `python-study/mahjong/README.md` | C | engine READMEへ丸ごと移さない | `—` | `—` | `needs decision` | learning history / old runtime説明が混在 |
 | `python-study/docs/mahjong-architecture.md` | C | engine知見は `architecture.md` / `rules.md` / 本ledgerへ抽出 | `—` | `—` | `needs decision` | lisjong・mjai・進捗履歴も混在するためcross-repo判断が必要 |
 
@@ -440,7 +440,6 @@ engine migration sourceとしては保持不要と判断した資産。**まだ�
 - old `game/public_state.py` / observation / controller / Player-ABC concept source
 - old `game/action_descriptor.py`
 - `_kakan_round_fixture.py` の旧seed探索fixture
-- `python-study/docs/mahjong-rules.md`（engine移行観点）
 
 後続auditでは、`python-study` 内のCLI / Replay等がこれらをimportしていないか、
 あるいは同じfileにengine外の未移行情報が混在していないかを確認してから削除する。
@@ -450,6 +449,7 @@ engine migration sourceとしては保持不要と判断した資産。**まだ�
 現時点でengine migration/referenceの価値が残るもの。
 
 - `python-study/mahjong/rules.py` のexternal preset data / evidence
+- `python-study/docs/mahjong-rules.md` のexternal preset provenance / 情報源 / 一部のルール決定履歴
 - `_ankan_chankan_round_fixture.py` のspecific edge-case coverage（current testとの最終照合まで）
 
 これらは必要情報を別の正本へ移した後にcleanup reviewへ進める。
