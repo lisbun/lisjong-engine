@@ -186,6 +186,55 @@ RoundState(
 `riichi_payment_deltas` を記録する。実際の点数移動と供託本数の管理はMatch層が担当する。
 これによりRoundの合法手・状態遷移と、Matchの継続的な点数authorityを分離する。
 
+### Seat-specific Observation boundary
+
+外部caller、AI、UIへ局面を渡す際は、`MatchState` / `RoundState` の内部完全状態を
+直接公開せず、意思決定を要求された席ごとのimmutableな `SeatObservation` へ射影する。
+
+```text
+MatchState + active RoundState + viewer seat
+    -> build_seat_observation()
+    -> SeatObservation
+```
+
+builderは `MatchPhase.ROUND_IN_PROGRESS` のactive roundがdecision phaseにあり、viewerが
+そのdecisionを要求されている場合だけ成功するpure projectionである。viewer自身の手牌、
+全席の河・成立済み副露・点数・立直成立状態、公開済みドラ表示牌、live wall残枚数、
+局位置だけをcopyしたfrozen値として返し、内部stateをmutationしない。
+
+Observationのhidden information boundaryでは、次を公開しない。
+
+- 他家concealed handとその枚数
+- live wallの牌種・順序、dead wall内部、裏ドラ表示牌、未公開の槓ドラ表示牌
+- physical tile ID / copy index、`Tile`等の内部physical object
+- match seed、round seed、`RoundRandomProvenance`
+- `MatchState` / `RoundState` / `PlayerState`等のmutable内部object
+
+自手牌と副露内の牌は `TileType + is_red` というpublic meaningで決定的に正規化するため、
+物理copyやhidden wall順、random provenanceだけが異なる同一公開局面は同じObservationになる。
+河の立直宣言牌はpending declarationやRonで不成立になった宣言をmarkせず、成立済みの
+`RiichiDeclarationFinalization`に対応する捨て牌だけをmarkする。ドラ表示牌は
+`RoundState.revealed_dora_indicators`だけを入力とし、遅延中の大明槓ドラを推測しない。
+
+局中のplayer-visible scoreは、Matchのauthoritative scoreを変更せず次で導出する。
+
+```text
+visible score = MatchState.scores + active RoundState.riichi_payment_deltas
+```
+
+同様に、player-visibleな供託本数は、局開始前からcarryされたMatch authorityと今局の
+成立済み供託factを合成する。
+
+```text
+visible riichi sticks
+    = MatchState.position.riichi_sticks
+    + len(active RoundState.riichi_contributions)
+```
+
+`SeatObservation`は見えている局面情報だけを担当し、`LegalActionSnapshot`とは別境界にする。
+Observationへaction ID、action option、physical `LegalAction`を埋め込まない。G1はdriver、
+selector、Player / Policy、action translationを持たず、既存pull APIも変更しない。
+
 ### 合法手導出と反応境界
 
 合法手の導出は状態mutationから分離したpure moduleに置き、`RoundState` 側は
