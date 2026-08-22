@@ -4,8 +4,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
+from lisjong_engine.meld import Ankan, Chi, Daiminkan, Kakan, Meld, Pon
 from lisjong_engine.seat import Seat
-from lisjong_engine.tile import TileCategory, TileType
+from lisjong_engine.tile import Tile, TileCategory, TileType
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,52 @@ class SeatRiichiState:
         _validate_seat(self.seat)
         if type(self.is_established) is not bool:
             raise TypeError("is_established must be a bool")
+
+
+@dataclass(frozen=True)
+class SeatPointDelta:
+    """局・半荘の精算により1席の点数が増減した量。絶対点ではなく差分。"""
+
+    seat: Seat
+    delta: int
+
+    def __post_init__(self) -> None:
+        _validate_seat(self.seat)
+        if type(self.delta) is not int:
+            raise TypeError("delta must be an int")
+
+
+def public_tile(tile: Tile) -> PublicTile:
+    """物理copyを持つ`Tile`を、牌種と赤情報だけの公開値へ射影する。"""
+    if not isinstance(tile, Tile):
+        raise TypeError("tile must be a Tile")
+    return PublicTile(tile.tile_type, tile.is_red)
+
+
+def public_meld(meld: Meld) -> PublicMeld:
+    """内部`Meld`を、物理牌identityを持たない公開値へ射影する。"""
+    if isinstance(meld, Pon):
+        meld_type = PublicMeldType.PON
+        from_seat = meld.source_seat
+    elif isinstance(meld, Chi):
+        meld_type = PublicMeldType.CHI
+        from_seat = meld.source_seat
+    elif isinstance(meld, Daiminkan):
+        meld_type = PublicMeldType.DAIMINKAN
+        from_seat = meld.source_seat
+    elif isinstance(meld, Kakan):
+        meld_type = PublicMeldType.KAKAN
+        from_seat = meld.source_seat
+    elif isinstance(meld, Ankan):
+        meld_type = PublicMeldType.ANKAN
+        from_seat = None
+    else:
+        raise TypeError("meld must be Pon, Chi, Daiminkan, Kakan, or Ankan")
+    return PublicMeld(
+        meld_type=meld_type,
+        tiles=tuple(public_tile(tile) for tile in meld.tiles),
+        from_seat=from_seat,
+    )
 
 
 def _validate_seat(seat: Seat) -> None:

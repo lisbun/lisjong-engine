@@ -12,11 +12,11 @@ from lisjong_engine.meld import Ankan, Chi, Daiminkan, Kakan, Pon
 from lisjong_engine.observation import ObservationDecisionKind, SeatObservation
 from lisjong_engine.observation_builder import (
     _decision_kind_from_phase,
-    _public_meld,
     build_seat_observation,
 )
 from lisjong_engine.player_state import PlayerState
 from lisjong_engine.public_state import PublicMeldType
+from lisjong_engine.public_state import public_meld as _public_meld
 from lisjong_engine.reaction import ReactionType
 from lisjong_engine.riichi_event import (
     RiichiDeclaration,

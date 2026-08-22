@@ -289,6 +289,118 @@ forced draw、嶺上draw、pending Ron finalization、局精算はそれぞれ�
 G2の決定的最小driver完了を、現在の移行ロードマップにおける`lisjong-engine` v0.1の
 到達点とする。
 
+### Consumer向けordered progressとplayer-safe completion delivery
+
+Human Play等の外部consumerが、前回decisionから次回decisionまでに成立した
+objective public factを順序付きで受け取り、round / match完了時にはplayer-safeな
+完了factを受け取れるよう、`run_hanchan()`へoptionalなdelivery境界を追加する
+（Issue #34）。
+
+**internal `RoundEvent`とplayer-facing progress projectionは別contractである。**
+`round_event.py`の`RoundEvent` / `RoundEventSnapshot`はengine内部のaudit /
+test / `RoundResult`構築用contractのままであり、player-facing public contractへ
+昇格しない。`round_progress.py`が、局内で成立したfactのうち次のwhitelistだけを
+`RoundProgressFact`（`DiscardProgress` / `MeldCalledProgress` /
+`KanDeclaredProgress` / `KanConfirmedProgress` / `RiichiDeclaredProgress` /
+`RiichiEstablishedProgress` / `RiichiFailedProgress` /
+`DoraIndicatorRevealedProgress`）へ射影する。
+
+```text
+TileDiscardedEvent           -> DiscardProgress
+MeldCalledEvent               -> MeldCalledProgress（チー・ポン・大明槓成立）
+KanDeclaredEvent               -> KanDeclaredProgress（加槓・暗槓宣言）
+KanConfirmedEvent（大明槓以外） -> KanConfirmedProgress（加槓・暗槓成立）
+RiichiDeclaredEvent            -> RiichiDeclaredProgress
+RiichiFinalizedEvent           -> RiichiEstablishedProgress / RiichiFailedProgress
+DoraIndicatorRevealedEvent     -> DoraIndicatorRevealedProgress
+```
+
+成立済みチー・ポン・大明槓の通知sourceは`MeldCalledEvent`だけとし、
+`ReactionsResolvedEvent`からは重複して生成しない。`ReactionsResolvedEvent`
+自体は、各seatのron capable / selected / passed、鳴きのcandidate等の
+hidden decision factを保持するため、一切progress factを生成しない。
+`RoundStartedEvent` / `TilesDealtEvent`（他家配牌） / `TileDrawnEvent`
+（他家ツモを含む） / `MissedRonRecordedEvent` / `RoundEndedEvent`も
+同様にwhitelist対象外である。projectionは既存の`PublicTile` /
+`PublicMeld`（`public_state.py`の`public_tile()` / `public_meld()`）を
+再利用し、Observationと同じphysical-identity-freeなboundaryを維持する。
+
+**raw internal object / result / provenanceをconsumerへ公開しない。**
+`RoundEvent` / `RoundEventSnapshot` / `ReactionResolution` / `RoundResult` /
+`CompletedRound` / `CompletedMatch` / `Tile` / `LegalAction` /
+`RoundRandomProvenance` / seed / mutable `RoundState` / `MatchState` /
+`PlayerState`は、delivery境界を経由してconsumerへ到達しない。round /
+match completionも同様にwhitelist方式で構築する。`round_completion.py`の
+`project_round_completion()` / `project_match_completion()`が、
+`CompletedRound` / `CompletedMatch`から`RoundCompletionFact` /
+`MatchCompletionFact`（和了 / 荒牌流局 / 途中流局の種別、winner席と
+win method、source seat、席別point delta、精算後score、dealer
+continuation、次局有無、`MatchEndReason`、最終score・順位）だけを構築する。
+`CompletedRound.random_provenance`や`CompletedMatch.history`のような
+内部監査専用fieldは対応する公開fieldを持たない。役・符・ドラの内訳等、
+既存型の内部構造を無理にすべて再現する必要がない情報は、本Issueの
+minimum scopeへ含めない。
+
+**ordered progress deliveryのminimum boundary。**
+`RoundState.revision`だけをevent cursorとして扱うと、1 transactionが
+複数eventを追加した場合に欠落が起こり得るため、driver（`driver.py`）は
+transaction前後の`RoundState.events`の長さから、そのtransactionが実際に
+追加したevent sliceを欠落なく取得する。
+
+```text
+successful engine transaction
+    -> 新しく追加されたinternal RoundEvent slice
+    -> project_round_progress() でplayer-safe projection
+    -> 空でなければ1つのordered batchとしてdelivery
+    -> callback return
+    -> 次のengine transition
+```
+
+progress、round completion、match completionはすべて同じ
+`tuple[RoundProgressFact | RoundCompletionFact | MatchCompletionFact, ...]`
+という1つのordered batch abstraction（`DeliveryItem` / `DeliveryCallback`、
+`run_hanchan(..., on_delivery=...)`）で扱い、round用APIとmatch用APIを
+分裂させない。
+
+**round settlement後・next round開始前のcompletion boundary。**
+`MatchState.settle_active_round()`が成功commitした直後、`start_round()`が
+次局を開始するより前に、driverはround completion（terminalなら続けて
+match completion）を同じbatchでdeliveryする。
+
+```text
+RoundPhase.FINISHED
+    -> MatchState.settle_active_round()（成功commit）
+    -> project_round_completion() [+ project_match_completion()]
+    -> 1つのordered batchとしてdelivery
+    -> callback return
+    -> non-terminalなら次のstart_round()、terminalならCompletedMatchを返す
+```
+
+terminal局ではround completionとmatch completionを同じbatch・同じ呼び出しで
+順序どおりにdeliveryし、別呼び出しに分けたり重複させたりしない。
+
+**synchronous / fail-fast / no rollback / no automatic retry semantics。**
+`on_delivery`はsynchronousである。成功commitしたengine transactionの後にだけ
+呼ばれ、callbackがreturnするまでdriverは次のtransition（次局の
+`start_round()`を含む）へ進まない。callbackが例外を送出した場合、
+その例外はfail-fastでそのまま`run_hanchan()`の呼び出し元へ伝播し、
+既に成功commitしたengine state（settlement、局進行）をrollbackしない。
+自動retry、自動replay、durable queue、acknowledgement protocolは提供しない。
+callback失敗後に同じ`run_hanchan()`呼び出しを安全にresumeできることは
+保証しない。
+
+**Human Play固有UI interactionはconsumer責務である。** Enter待ち、prompt、
+menu番号、CLI文字列、GUI widget、KeyboardInterrupt等のfrontend固有
+cancellation、Human seat assignmentはengine契約に含めない。`SeatObservation`
+と`ActionDescriptor`にはprogress historyを混入させず、snapshot / choice
+contractとprogress / completion deliveryを別関心のまま維持する。
+
+**generic event / replay schemaを今回固定していない。** 本境界はconcrete
+Human Play requirementから導いた最小差分であり、generic `GameEvent` /
+`GameRecord` / observer framework / pub-sub / JSON event schema / replay
+formatを新設しない。将来複数consumerが必要とする場合も、この最小boundaryを
+起点に再検討する。
+
 ### 合法手導出と反応境界
 
 合法手の導出は状態mutationから分離したpure moduleに置き、`RoundState` 側は
