@@ -2,22 +2,20 @@
 
 from lisjong_engine.discard import Discard
 from lisjong_engine.match_state import MatchPhase, MatchState
-from lisjong_engine.meld import Ankan, Chi, Daiminkan, Kakan, Meld, Pon
 from lisjong_engine.observation import ObservationDecisionKind, SeatObservation
 from lisjong_engine.public_state import (
     PublicDiscard,
-    PublicMeld,
-    PublicMeldType,
     PublicTile,
     SeatDiscards,
     SeatMelds,
     SeatRiichiState,
     SeatScore,
+    public_meld,
+    public_tile,
 )
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.seat import Seat
-from lisjong_engine.tile import Tile
 
 _DECISION_KINDS = {
     RoundPhase.AWAITING_DISCARD: ObservationDecisionKind.TURN,
@@ -56,7 +54,7 @@ def build_seat_observation(
         discards=tuple(_seat_discards(round_state, seat) for seat in Seat),
         melds=tuple(_seat_melds(round_state, seat) for seat in Seat),
         dora_indicators=tuple(
-            _public_tile(tile) for tile in round_state.revealed_dora_indicators
+            public_tile(tile) for tile in round_state.revealed_dora_indicators
         ),
         remaining_live_wall_count=round_state.remaining_count,
         scores=tuple(_seat_score(match_state, round_state, seat) for seat in Seat),
@@ -84,44 +82,13 @@ def _validate_deciding_seat(round_state: RoundState, viewer_seat: Seat) -> None:
         raise RuntimeError("viewer is not a seat in the reaction window")
 
 
-def _public_tile(tile: Tile) -> PublicTile:
-    if not isinstance(tile, Tile):
-        raise TypeError("tile must be a Tile")
-    return PublicTile(tile.tile_type, tile.is_red)
-
-
 def _public_tile_sort_key(tile: PublicTile) -> tuple[int, bool]:
     return (tile.tile_type.id, tile.is_red)
 
 
-def _sorted_public_tiles(tiles: tuple[Tile, ...]) -> tuple[PublicTile, ...]:
+def _sorted_public_tiles(tiles: tuple) -> tuple[PublicTile, ...]:
     return tuple(
-        sorted((_public_tile(tile) for tile in tiles), key=_public_tile_sort_key)
-    )
-
-
-def _public_meld(meld: Meld) -> PublicMeld:
-    if isinstance(meld, Pon):
-        meld_type = PublicMeldType.PON
-        from_seat = meld.source_seat
-    elif isinstance(meld, Chi):
-        meld_type = PublicMeldType.CHI
-        from_seat = meld.source_seat
-    elif isinstance(meld, Daiminkan):
-        meld_type = PublicMeldType.DAIMINKAN
-        from_seat = meld.source_seat
-    elif isinstance(meld, Kakan):
-        meld_type = PublicMeldType.KAKAN
-        from_seat = meld.source_seat
-    elif isinstance(meld, Ankan):
-        meld_type = PublicMeldType.ANKAN
-        from_seat = None
-    else:
-        raise TypeError("meld must be Pon, Chi, Daiminkan, Kakan, or Ankan")
-    return PublicMeld(
-        meld_type=meld_type,
-        tiles=_sorted_public_tiles(meld.tiles),
-        from_seat=from_seat,
+        sorted((public_tile(tile) for tile in tiles), key=_public_tile_sort_key)
     )
 
 
@@ -146,7 +113,7 @@ def _public_discard(
     if type(is_riichi_declaration) is not bool:
         raise TypeError("is_riichi_declaration must be a bool")
     return PublicDiscard(
-        tile=_public_tile(discard.tile),
+        tile=public_tile(discard.tile),
         is_tsumogiri=discard.is_tsumogiri,
         is_riichi_declaration=is_riichi_declaration,
         called_by=discard.called_by,
@@ -173,7 +140,7 @@ def _seat_discards(round_state: RoundState, seat: Seat) -> SeatDiscards:
 def _seat_melds(round_state: RoundState, seat: Seat) -> SeatMelds:
     return SeatMelds(
         seat,
-        tuple(_public_meld(meld) for meld in round_state.melds(seat)),
+        tuple(public_meld(meld) for meld in round_state.melds(seat)),
     )
 
 
