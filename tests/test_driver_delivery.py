@@ -10,21 +10,32 @@ failure semantics、hidden-information boundary、backward compatibilityに
 import unittest
 from dataclasses import fields, is_dataclass
 
-from _round_fixtures import dealt_state
+from _round_fixtures import (
+    INERT_HAND,
+    dealt_state,
+)
 
 from lisjong_engine.action_descriptor import (
     ActionDescriptor,
+    AnkanActionDescriptor,
     ChiActionDescriptor,
     DiscardActionDescriptor,
     PassActionDescriptor,
+    RiichiDiscardActionDescriptor,
+    RonActionDescriptor,
 )
 from lisjong_engine.driver import _advance_round, _settle_round, run_hanchan
+from lisjong_engine.legal_action import (
+    LegalAction,
+)
 from lisjong_engine.match_state import (
     CompletedMatch,
+    CompletedRound,
     MatchPhase,
     MatchState,
     RoundPosition,
 )
+from lisjong_engine.player_state import PlayerState
 from lisjong_engine.public_state import PublicTile
 from lisjong_engine.reaction import ReactionResolution
 from lisjong_engine.round_allocation import RoundRandomProvenance
@@ -33,9 +44,19 @@ from lisjong_engine.round_event import RoundEvent, RoundEventSnapshot
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_progress import (
     DiscardProgress,
+    DoraIndicatorRevealedProgress,
+    KanConfirmedProgress,
+    KanDeclaredProgress,
     MeldCalledProgress,
+    RiichiDeclaredProgress,
+    RiichiEstablishedProgress,
+    RiichiFailedProgress,
 )
-from lisjong_engine.round_result import AbortiveDrawReason, AbortiveDrawResult
+from lisjong_engine.round_result import (
+    AbortiveDrawReason,
+    AbortiveDrawResult,
+    RoundResult,
+)
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import Tile, TileCategory, TileType
@@ -104,8 +125,139 @@ _REACTION_HANDS = {
     ),
 }
 
+_ANKAN_HANDS = {
+    Seat.EAST: (
+        "1m",
+        "1m",
+        "1m",
+        "1m",
+        "2m",
+        "3m",
+        "4m",
+        "5m",
+        "6m",
+        "7m",
+        "8m",
+        "2p",
+        "3p",
+    ),
+    Seat.SOUTH: (
+        "1z",
+        "2z",
+        "3z",
+        "4z",
+        "5z",
+        "6z",
+        "7z",
+        "4p",
+        "7p",
+        "4s",
+        "7s",
+        "2s",
+        "5s",
+    ),
+    Seat.WEST: (
+        "1z",
+        "2z",
+        "3z",
+        "4z",
+        "5z",
+        "6z",
+        "7z",
+        "5p",
+        "8p",
+        "3s",
+        "6s",
+        "9s",
+        "9m",
+    ),
+    Seat.NORTH: (
+        "9m",
+        "9m",
+        "1p",
+        "9p",
+        "1s",
+        "9s",
+        "1z",
+        "2z",
+        "3z",
+        "4z",
+        "5z",
+        "6z",
+        "7z",
+    ),
+}
+
+# EASTが立直可能なtenpai形で"5z"を打つ配牌。WESTの手を差し替えることで、
+# 誰も反応できずに立直が成立する場合と、WESTがロンして立直が不成立になる
+# 場合の両方を同じEAST側配牌から作れる。
+_RIICHI_EAST_HAND = (
+    "2m",
+    "3m",
+    "4m",
+    "5m",
+    "6m",
+    "7m",
+    "2p",
+    "3p",
+    "4p",
+    "5p",
+    "6p",
+    "2s",
+    "2s",
+)
+_RIICHI_ESTABLISH_HANDS = {
+    Seat.EAST: _RIICHI_EAST_HAND,
+    Seat.SOUTH: INERT_HAND,
+    Seat.WEST: INERT_HAND,
+    Seat.NORTH: INERT_HAND,
+}
+# WESTは5z/6zのシャンポン待ち。EASTが打つ"5z"をロンすると白の役牌が成立する。
+_RIICHI_FAIL_HANDS = {
+    Seat.EAST: _RIICHI_EAST_HAND,
+    Seat.SOUTH: INERT_HAND,
+    Seat.WEST: (
+        "1m",
+        "2m",
+        "3m",
+        "4m",
+        "5m",
+        "6m",
+        "7p",
+        "8p",
+        "9p",
+        "5z",
+        "5z",
+        "6z",
+        "6z",
+    ),
+    Seat.NORTH: INERT_HAND,
+}
+
 _7P = PublicTile(TileType(TileCategory.PINZU, 7))
 _1M = PublicTile(TileType(TileCategory.MANZU, 1))
+
+# whitelist projectionが将来regressionしても検出できるよう、型だけでなく
+# field名でも危険な値を拒否する。tile_id等はintとして紛れ込み得るため、
+# 型ベースのrecursive checkだけでは検出できない。
+_FORBIDDEN_FIELD_NAMES = frozenset(
+    {
+        "tile_id",
+        "tile_ids",
+        "consumed_tile_ids",
+        "added_tile_id",
+        "target_tile_id",
+        "seed",
+        "match_seed",
+        "round_seed",
+        "round_ordinal",
+        "random_provenance",
+        "candidates",
+        "choices",
+        "resolution",
+        "history",
+    }
+)
 
 _FORBIDDEN_TYPES = (
     RoundEvent,
@@ -116,6 +268,10 @@ _FORBIDDEN_TYPES = (
     RoundState,
     MatchState,
     CompletedMatch,
+    CompletedRound,
+    RoundResult,
+    LegalAction,
+    PlayerState,
 )
 
 
@@ -172,6 +328,43 @@ def _chi_or_pass_selector(
             return option
     for option in options:
         if isinstance(option, PassActionDescriptor):
+            return option
+    return options[0]
+
+
+def _riichi_tsumogiri_or_pass_selector(
+    _observation, options: tuple[ActionDescriptor, ...]
+) -> ActionDescriptor:
+    for option in options:
+        if isinstance(option, RiichiDiscardActionDescriptor) and option.is_tsumogiri:
+            return option
+    for option in options:
+        if isinstance(option, PassActionDescriptor):
+            return option
+    return options[0]
+
+
+def _ron_or_pass_selector(ron_seat: Seat):
+    def selector(
+        observation, options: tuple[ActionDescriptor, ...]
+    ) -> ActionDescriptor:
+        if observation.viewer_seat is ron_seat:
+            for option in options:
+                if isinstance(option, RonActionDescriptor):
+                    return option
+        for option in options:
+            if isinstance(option, PassActionDescriptor):
+                return option
+        return options[0]
+
+    return selector
+
+
+def _ankan_or_first_selector(
+    _observation, options: tuple[ActionDescriptor, ...]
+) -> ActionDescriptor:
+    for option in options:
+        if isinstance(option, AnkanActionDescriptor):
             return option
     return options[0]
 
@@ -239,6 +432,153 @@ class ProgressDeliveryOrderingTest(unittest.TestCase):
         _advance_round(match, state, _selectors(lambda o, a: a[0]), batches.append, 0)
 
         self.assertEqual(batches, [])
+
+
+class FullOrderedSequenceTest(unittest.TestCase):
+    """discard/kanのように複数transactionへまたがるfactの、完全なorderingを固定する。"""
+
+    def test_riichi_discard_declaration_and_establishment_full_order(self) -> None:
+        state = dealt_state(
+            hands=_RIICHI_ESTABLISH_HANDS, draws=("5z",), with_dead_wall=True
+        )
+        match = _match_with_active_round(state)
+        delivered: list = []
+        selectors = _selectors(_riichi_tsumogiri_or_pass_selector)
+
+        # 誰も反応できないため、宣言と成立は打牌と同じtransaction内で確定する。
+        cursor = _advance_round(match, state, selectors, delivered.extend, 0)  # draw
+        _advance_round(match, state, selectors, delivered.extend, cursor)  # discard
+
+        self.assertEqual(
+            [type(item) for item in delivered],
+            [DiscardProgress, RiichiDeclaredProgress, RiichiEstablishedProgress],
+        )
+        self.assertTrue(all(item.seat is Seat.EAST for item in delivered))
+
+    def test_riichi_discard_declaration_and_ron_failure_full_order(self) -> None:
+        state = dealt_state(
+            hands=_RIICHI_FAIL_HANDS, draws=("5z",), with_dead_wall=True
+        )
+        match = _match_with_active_round(state)
+        delivered: list = []
+        selectors = {
+            Seat.EAST: _riichi_tsumogiri_or_pass_selector,
+            Seat.SOUTH: _ron_or_pass_selector(Seat.WEST),
+            Seat.WEST: _ron_or_pass_selector(Seat.WEST),
+            Seat.NORTH: _ron_or_pass_selector(Seat.WEST),
+        }
+
+        cursor = _advance_round(match, state, selectors, delivered.extend, 0)  # draw
+        cursor = _advance_round(
+            match, state, selectors, delivered.extend, cursor
+        )  # discard + declaration, opens the reaction window
+        _advance_round(
+            match, state, selectors, delivered.extend, cursor
+        )  # West rons -> riichi fails
+
+        self.assertEqual(
+            [type(item) for item in delivered],
+            [DiscardProgress, RiichiDeclaredProgress, RiichiFailedProgress],
+        )
+        self.assertTrue(
+            all(item.seat is Seat.EAST for item in delivered),
+            "riichi declaration and its outcome must stay attributed to the declarer",
+        )
+
+    def test_ankan_declaration_confirmation_and_dora_reveal_full_order(self) -> None:
+        state = dealt_state(hands=_ANKAN_HANDS, draws=("8s",), with_dead_wall=True)
+        match = _match_with_active_round(state)
+        delivered: list = []
+        selectors = _selectors(_ankan_or_first_selector)
+
+        # kokushi_ankan_chankan_enabledを有効化していないため、槍槓windowを
+        # 経由せず、宣言・成立・槓ドラ公開が1つのtransactionで確定する。
+        cursor = _advance_round(match, state, selectors, delivered.extend, 0)  # draw
+        _advance_round(match, state, selectors, delivered.extend, cursor)  # ankan
+
+        self.assertEqual(
+            [type(item) for item in delivered],
+            [KanDeclaredProgress, KanConfirmedProgress, DoraIndicatorRevealedProgress],
+        )
+        self.assertTrue(all(item.seat is Seat.EAST for item in delivered))
+
+
+class PublicBoundaryCompletionTest(unittest.TestCase):
+    """`run_hanchan(..., on_delivery=...)`という公開境界そのものでtiming / failureを確認する。
+
+    他のtestは実装の詳細である`_settle_round()` / `_advance_round()`を直接
+    呼んでいるが、Issue #34が実際に保証したcontractはこのpublic driver関数
+    である。
+    """
+
+    def test_completion_callback_timing_and_failure_via_public_boundary(self) -> None:
+        match = MatchState(seed=7)
+        round_state = match.start_round()
+        _finish_with_result(
+            round_state, AbortiveDrawResult(AbortiveDrawReason.FOUR_WINDS)
+        )
+
+        probe: dict = {}
+
+        def probing_delivery(items):
+            probe["items"] = items
+            probe["phase"] = match.phase
+            probe["active_round"] = match.active_round
+            probe["started_round_count"] = match._started_round_count
+            raise RuntimeError("stop before the next round starts")
+
+        def unexpected(_observation, _options):
+            self.fail("no selector should be called before the completion callback")
+
+        with self.assertRaisesRegex(RuntimeError, "stop before the next round starts"):
+            run_hanchan(match, _selectors(unexpected), on_delivery=probing_delivery)
+
+        # settle_active_round()は既にcommitされているが、次のstart_round()は
+        # callback呼び出しの時点でまだ呼ばれていない。
+        self.assertIsInstance(probe["items"][0], RoundCompletionFact)
+        self.assertIs(probe["phase"], MatchPhase.AWAITING_ROUND)
+        self.assertIsNone(probe["active_round"])
+        self.assertEqual(probe["started_round_count"], 1)
+        self.assertEqual(len(match.history), 1)
+
+        # callback例外の後も、driverは次のstart_round()へ進んでいない。
+        self.assertIs(match.phase, MatchPhase.AWAITING_ROUND)
+        self.assertIsNone(match.active_round)
+        self.assertEqual(match._started_round_count, 1)
+
+    def test_run_hanchan_returns_completed_match_after_terminal_completion(
+        self,
+    ) -> None:
+        position = RoundPosition(
+            prevailing_wind=Wind.WEST,
+            hand_number=4,
+            dealer_seat=Seat.NORTH,
+            honba=0,
+            riichi_sticks=0,
+        )
+        match = _match_at_position(1, position)
+        round_state = match.start_round()
+        _finish_with_result(
+            round_state, AbortiveDrawResult(AbortiveDrawReason.FOUR_WINDS)
+        )
+
+        received: list = []
+
+        def unexpected(_observation, _options):
+            self.fail(
+                "no selector should be called for an already-finished terminal round"
+            )
+
+        completed = run_hanchan(
+            match, _selectors(unexpected), on_delivery=received.append
+        )
+
+        self.assertIsInstance(completed, CompletedMatch)
+        self.assertIs(match.completed_match, completed)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(len(received[0]), 2)
+        self.assertIsInstance(received[0][0], RoundCompletionFact)
+        self.assertIsInstance(received[0][1], MatchCompletionFact)
 
 
 class RoundTransitionTimingTest(unittest.TestCase):
@@ -402,6 +742,12 @@ class HiddenInformationTest(unittest.TestCase):
 
         if is_dataclass(value) and not isinstance(value, type):
             for field in fields(value):
+                self.assertNotIn(
+                    field.name,
+                    _FORBIDDEN_FIELD_NAMES,
+                    f"{type(value).__name__}.{field.name} is a forbidden field name "
+                    "(hidden-identity/provenance leak)",
+                )
                 self._assert_no_forbidden_reference(
                     getattr(value, field.name), seen=seen
                 )

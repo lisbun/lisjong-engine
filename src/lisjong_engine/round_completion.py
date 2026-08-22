@@ -108,6 +108,37 @@ class RoundCompletionFact:
                 "scores_after must contain exactly all four seats in order"
             )
 
+        winner_seats = tuple(winner.seat for winner in winners)
+        if len(set(winner_seats)) != len(winner_seats):
+            raise ValueError("winners must not contain duplicate seats")
+
+        if self.outcome is RoundOutcomeKind.WIN:
+            if not winners:
+                raise ValueError("a win outcome requires at least one winner")
+            if tenpai_seats or nagashi_mangan_seats:
+                raise ValueError("a win outcome must not carry exhaustive draw seats")
+            if self.abortive_reason is not None:
+                raise ValueError("a win outcome must not carry an abortive_reason")
+        else:
+            if winners:
+                raise ValueError("only a win outcome may carry winners")
+            if self.source_seat is not None:
+                raise ValueError("only a win outcome may carry a source_seat")
+            if self.outcome is RoundOutcomeKind.EXHAUSTIVE_DRAW:
+                if self.abortive_reason is not None:
+                    raise ValueError(
+                        "an exhaustive draw outcome must not carry an abortive_reason"
+                    )
+            else:
+                if tenpai_seats or nagashi_mangan_seats:
+                    raise ValueError(
+                        "an abortive draw outcome must not carry exhaustive draw seats"
+                    )
+                if self.abortive_reason is None:
+                    raise ValueError(
+                        "an abortive draw outcome requires an abortive_reason"
+                    )
+
         object.__setattr__(self, "winners", winners)
         object.__setattr__(self, "tenpai_seats", tenpai_seats)
         object.__setattr__(self, "nagashi_mangan_seats", nagashi_mangan_seats)
@@ -154,7 +185,10 @@ class MatchCompletionFact:
             raise ValueError(
                 "final_scores must contain exactly all four seats in order"
             )
-        if frozenset(result.seat for result in final_results) != frozenset(_SEAT_ORDER):
+        result_seats = tuple(result.seat for result in final_results)
+        if len(set(result_seats)) != len(result_seats):
+            raise ValueError("final_results must not contain duplicate seats")
+        if frozenset(result_seats) != frozenset(_SEAT_ORDER):
             raise ValueError("final_results must contain exactly all four seats")
 
         object.__setattr__(self, "final_scores", final_scores)
