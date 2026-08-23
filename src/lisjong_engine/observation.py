@@ -39,6 +39,7 @@ class SeatObservation:
     honba: int
     riichi_sticks: int
     hand_tiles: tuple[PublicTile, ...]
+    drawn_tile: PublicTile | None
     discards: tuple[SeatDiscards, ...]
     melds: tuple[SeatMelds, ...]
     dora_indicators: tuple[PublicTile, ...]
@@ -77,6 +78,23 @@ class SeatObservation:
             PublicTile,
             field_name="hand_tiles",
         )
+        if self.drawn_tile is not None:
+            if not isinstance(self.drawn_tile, PublicTile):
+                raise TypeError("drawn_tile must be a PublicTile or None")
+            if self.drawn_tile not in hand_tiles:
+                raise ValueError(
+                    "drawn_tile must be semantically present in hand_tiles"
+                )
+        if (
+            self.decision_kind
+            in {
+                ObservationDecisionKind.DISCARD_REACTION,
+                ObservationDecisionKind.KAKAN_REACTION,
+                ObservationDecisionKind.ANKAN_REACTION,
+            }
+            and self.drawn_tile is not None
+        ):
+            raise ValueError("reaction observations must not expose a drawn tile")
         dora_indicators = _typed_tuple(
             self.dora_indicators,
             PublicTile,
@@ -102,6 +120,16 @@ class SeatObservation:
             SeatRiichiState,
             field_name="riichi_states",
         )
+
+        discard_orders = tuple(
+            discard.order
+            for seat_discards in discards
+            for discard in seat_discards.discards
+        )
+        if tuple(sorted(discard_orders)) != tuple(range(len(discard_orders))):
+            raise ValueError(
+                "discard orders must be unique and contiguous from zero within a round"
+            )
 
         object.__setattr__(self, "hand_tiles", hand_tiles)
         object.__setattr__(self, "dora_indicators", dora_indicators)

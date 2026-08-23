@@ -198,9 +198,31 @@ MatchState + active RoundState + viewer seat
 ```
 
 builderは `MatchPhase.ROUND_IN_PROGRESS` のactive roundがdecision phaseにあり、viewerが
-そのdecisionを要求されている場合だけ成功するpure projectionである。viewer自身の手牌、
-全席の河・成立済み副露・点数・立直成立状態、公開済みドラ表示牌、live wall残枚数、
-局位置だけをcopyしたfrozen値として返し、内部stateをmutationしない。
+そのdecisionを要求されている場合だけ成功するpure projectionである。`SeatObservation`は
+**現在のplayer-safeなdecision snapshot**であり、そのsnapshotを解釈するために必要な
+engine-owned public stateをconsumer側の履歴再構築へ委ねない。
+
+> `SeatObservation` is a current player-safe decision snapshot.
+> Engine-owned public state required to interpret that snapshot must not require
+> consumer-side history reconstruction.
+
+viewer自身の手牌に加えて、通常turnと`RIICHI_DISCARD`ではcurrent drawn tileを
+physical identityのない`PublicTile | None`として返す。チー・ポン後のdrawless discardでは
+`None`であり、discard・加槓・暗槓へのreaction observationには、宣言者側でdrawn tileを
+保持していても公開しない。non-`None`のdrawn tileは赤牌区分を含むsemantic equalityで
+必ずviewerの`hand_tiles`に含まれる。
+
+全席の河では、各`PublicDiscard`が局全体で共有する0始まりのchronological `order`を持つ。
+orderはseat内river indexではなく、calledされたdiscardも河に残ったまま同じ値を維持する。
+`is_riichi_declaration`は立直成立可否ではなく、actual declaration discardとして打たれた
+historical factを表すため、宣言牌適用直後のreaction windowから`True`になる。
+
+成立済み副露の`PublicMeld.called_tile`はチー・ポン・大明槓のcalled tileを保持し、加槓では
+added tileではなく元ポンのcalled tileとsource seatを維持する。暗槓の`from_seat`と
+`called_tile`はともに`None`である。立直のcurrent stateは`PublicRiichiStatus.NONE` /
+`PublicRiichiStatus.PENDING` / `PublicRiichiStatus.ESTABLISHED`の単一canonical valueで
+表し、立直選択後の
+`AWAITING_RIICHI_DISCARD`と宣言牌reaction未解決中を`PENDING`とする。
 
 Observationのhidden information boundaryでは、次を公開しない。
 
@@ -210,10 +232,11 @@ Observationのhidden information boundaryでは、次を公開しない。
 - match seed、round seed、`RoundRandomProvenance`
 - `MatchState` / `RoundState` / `PlayerState`等のmutable内部object
 
-自手牌と副露内の牌は `TileType + is_red` というpublic meaningで決定的に正規化するため、
-物理copyやhidden wall順、random provenanceだけが異なる同一公開局面は同じObservationになる。
-河の立直宣言牌はpending declarationやRonで不成立になった宣言をmarkせず、成立済みの
-`RiichiDeclarationFinalization`に対応する捨て牌だけをmarkする。ドラ表示牌は
+自手牌、drawn tile、副露内の牌は `TileType + is_red` というpublic meaningで決定的に
+正規化するため、物理copyやhidden wall順、random provenanceだけが異なる同一公開局面は
+同じObservationになる。discard orderと立直宣言牌flagはengine-owned internal event historyから
+losslessに射影するが、そのhistoryやphysical tile identity自体はpublic contractへ公開しない。
+projection元と河が不整合なら未知値へ丸めずfail closedにする。ドラ表示牌は
 `RoundState.revealed_dora_indicators`だけを入力とし、遅延中の大明槓ドラを推測しない。
 
 局中のplayer-visible scoreは、Matchのauthoritative scoreを変更せず次で導出する。
@@ -298,6 +321,16 @@ Human Play等の外部consumerが、前回decisionから次回decisionまでに�
 objective public factを順序付きで受け取り、round / match完了時にはplayer-safeな
 完了factを受け取れるよう、`run_hanchan()`へoptionalなdelivery境界を追加する
 （Issue #34）。
+
+```text
+SeatObservation          = 今このdecisionで見えるcurrent state
+ordered progress facts   = 前回snapshotから何が起きたか
+```
+
+snapshotの解釈に必要なcurrent public stateは`SeatObservation`自身が保持する。一方、ordered
+progressはsnapshot間の出来事を通知する別責務であり、snapshotへ履歴を埋め込まず、consumerへ
+current stateの再構築も要求しない。Issue #38のsnapshot補強は、ここで定義するprogress /
+completion schemaやdelivery timingを変更しない。
 
 **internal `RoundEvent`とplayer-facing progress projectionは別contractである。**
 `round_event.py`の`RoundEvent` / `RoundEventSnapshot`はengine内部のaudit /

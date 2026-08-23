@@ -5,6 +5,7 @@ from lisjong_engine.match_state import MatchPhase, MatchState
 from lisjong_engine.observation import ObservationDecisionKind, SeatObservation
 from lisjong_engine.public_state import (
     PublicDiscard,
+    PublicRiichiStatus,
     PublicTile,
     SeatDiscards,
     SeatMelds,
@@ -13,6 +14,7 @@ from lisjong_engine.public_state import (
     public_meld,
     public_tile,
 )
+from lisjong_engine.round_event import RiichiDeclaredEvent, TileDiscardedEvent
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.seat import Seat
@@ -54,6 +56,11 @@ def build_seat_observation(
     _validate_deciding_seat(round_state, viewer_seat)
 
     position = match_state.position
+    discard_orders = _discard_orders(round_state)
+    riichi_declaration_tile_ids = _riichi_declaration_tile_ids(
+        round_state,
+        discard_orders,
+    )
     return SeatObservation(
         viewer_seat=viewer_seat,
         decision_kind=decision_kind,
@@ -61,7 +68,16 @@ def build_seat_observation(
         honba=position.honba,
         riichi_sticks=_visible_riichi_sticks(match_state, round_state),
         hand_tiles=_sorted_public_tiles(round_state.hand_tiles(viewer_seat)),
-        discards=tuple(_seat_discards(round_state, seat) for seat in Seat),
+        drawn_tile=_viewer_drawn_tile(round_state, viewer_seat),
+        discards=tuple(
+            _seat_discards(
+                round_state,
+                seat,
+                discard_orders=discard_orders,
+                riichi_declaration_tile_ids=riichi_declaration_tile_ids,
+            )
+            for seat in Seat
+        ),
         melds=tuple(_seat_melds(round_state, seat) for seat in Seat),
         dora_indicators=tuple(
             public_tile(tile) for tile in round_state.revealed_dora_indicators
@@ -102,20 +118,68 @@ def _sorted_public_tiles(tiles: tuple) -> tuple[PublicTile, ...]:
     )
 
 
-def _established_riichi_declaration_tile_ids(
+def _viewer_drawn_tile(
     round_state: RoundState,
-    seat: Seat,
-) -> frozenset[int]:
-    return frozenset(
-        finalization.declaration.discard.tile.id
-        for finalization in round_state.riichi_finalizations
-        if finalization.is_established and finalization.seat is seat
+    viewer_seat: Seat,
+) -> PublicTile | None:
+    if round_state.phase not in _CURRENT_SEAT_DECISION_PHASES:
+        return None
+    if round_state.current_seat is not viewer_seat:
+        raise RuntimeError("a turn decision viewer must be the current seat")
+    drawn_tile = round_state.drawn_tile
+    return None if drawn_tile is None else public_tile(drawn_tile)
+
+
+def _discard_orders(round_state: RoundState) -> dict[int, int]:
+    """Internal event historyからround-global discard orderを構築する。"""
+    discard_events = tuple(
+        event for event in round_state.events if isinstance(event, TileDiscardedEvent)
     )
+    event_facts = {
+        event.tile.id: (order, event.seat) for order, event in enumerate(discard_events)
+    }
+    if len(event_facts) != len(discard_events):
+        raise RuntimeError("discard event history contains duplicate physical tiles")
+
+    river_facts = tuple(
+        (seat, discard) for seat in Seat for discard in round_state.discards(seat)
+    )
+    river_tile_ids = tuple(discard.tile.id for _, discard in river_facts)
+    if len(set(river_tile_ids)) != len(river_tile_ids):
+        raise RuntimeError("rivers contain duplicate physical discard tiles")
+    if set(event_facts) != set(river_tile_ids):
+        raise RuntimeError(
+            "discard event history and rivers must describe the same tiles"
+        )
+    if any(
+        event_facts[discard.tile.id][1] is not seat for seat, discard in river_facts
+    ):
+        raise RuntimeError("discard event history and river seats do not match")
+    return {tile_id: order for tile_id, (order, _) in event_facts.items()}
+
+
+def _riichi_declaration_tile_ids(
+    round_state: RoundState,
+    discard_orders: dict[int, int],
+) -> frozenset[int]:
+    tile_ids = tuple(
+        event.declaration.discard.tile.id
+        for event in round_state.events
+        if isinstance(event, RiichiDeclaredEvent)
+    )
+    if len(set(tile_ids)) != len(tile_ids):
+        raise RuntimeError(
+            "riichi declaration history contains duplicate discard tiles"
+        )
+    if not set(tile_ids).issubset(discard_orders):
+        raise RuntimeError("riichi declaration history must reference a discard")
+    return frozenset(tile_ids)
 
 
 def _public_discard(
     discard: Discard,
     *,
+    order: int,
     is_riichi_declaration: bool,
 ) -> PublicDiscard:
     if not isinstance(discard, Discard):
@@ -125,22 +189,26 @@ def _public_discard(
     return PublicDiscard(
         tile=public_tile(discard.tile),
         is_tsumogiri=discard.is_tsumogiri,
+        order=order,
         is_riichi_declaration=is_riichi_declaration,
         called_by=discard.called_by,
     )
 
 
-def _seat_discards(round_state: RoundState, seat: Seat) -> SeatDiscards:
-    declaration_tile_ids = _established_riichi_declaration_tile_ids(
-        round_state,
-        seat,
-    )
+def _seat_discards(
+    round_state: RoundState,
+    seat: Seat,
+    *,
+    discard_orders: dict[int, int],
+    riichi_declaration_tile_ids: frozenset[int],
+) -> SeatDiscards:
     return SeatDiscards(
         seat,
         tuple(
             _public_discard(
                 discard,
-                is_riichi_declaration=discard.tile.id in declaration_tile_ids,
+                order=discard_orders[discard.tile.id],
+                is_riichi_declaration=(discard.tile.id in riichi_declaration_tile_ids),
             )
             for discard in round_state.discards(seat)
         ),
@@ -169,7 +237,24 @@ def _seat_riichi_state(
     round_state: RoundState,
     seat: Seat,
 ) -> SeatRiichiState:
-    return SeatRiichiState(seat, round_state.is_riichi_established(seat))
+    pending_selection = (
+        round_state.phase is RoundPhase.AWAITING_RIICHI_DISCARD
+        and round_state.current_seat is seat
+    )
+    pending_declaration = round_state.pending_riichi_declaration
+    is_pending = pending_selection or (
+        pending_declaration is not None and pending_declaration.seat is seat
+    )
+    is_established = round_state.is_riichi_established(seat)
+    if is_pending and is_established:
+        raise RuntimeError("riichi cannot be pending and established at the same time")
+    if is_established:
+        status = PublicRiichiStatus.ESTABLISHED
+    elif is_pending:
+        status = PublicRiichiStatus.PENDING
+    else:
+        status = PublicRiichiStatus.NONE
+    return SeatRiichiState(seat, status)
 
 
 def _visible_riichi_sticks(
