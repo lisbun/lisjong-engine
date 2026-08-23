@@ -16,7 +16,6 @@ from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
     DaiminkanLegalAction,
-    DiscardDeclaration,
     KakanLegalAction,
     PonLegalAction,
 )
@@ -446,7 +445,7 @@ class RiichiProgressTest(unittest.TestCase):
         before = len(state.events)
 
         # 誰も反応できないため、宣言と成立は同じtransaction内で確定する。
-        draw_and_discard(state, Seat.EAST, declaration=DiscardDeclaration.RIICHI)
+        draw_and_discard(state, Seat.EAST, declares_riichi=True)
 
         facts = project_round_progress(tuple(state.events)[before:])
 
@@ -471,7 +470,7 @@ class RiichiProgressTest(unittest.TestCase):
         )
         before = len(state.events)
 
-        draw_and_discard(state, Seat.EAST, declaration=DiscardDeclaration.RIICHI)
+        draw_and_discard(state, Seat.EAST, declares_riichi=True)
         resolve_with(state, {Seat.WEST: ron_action(state, Seat.WEST)})
 
         facts = project_round_progress(tuple(state.events)[before:])

@@ -35,6 +35,15 @@ DeliveryItem: TypeAlias = RoundProgressFact | RoundCompletionFact | MatchComplet
 DeliveryCallback: TypeAlias = Callable[[tuple[DeliveryItem, ...]], None]
 
 _SEATS = tuple(Seat)
+# current seatだけが選ぶdecision phase。立直選択後の宣言牌decisionも、
+# 同じseatへ改めてselectorを呼ぶ独立decisionとして扱う。driverが宣言牌を
+# 自動選択することはなく、候補が1件しかない場合も必ずselectorを呼ぶ。
+_CURRENT_SEAT_DECISION_PHASES = frozenset(
+    {
+        RoundPhase.AWAITING_DISCARD,
+        RoundPhase.AWAITING_RIICHI_DISCARD,
+    }
+)
 _REACTION_PHASES = frozenset(
     {
         RoundPhase.AWAITING_REACTIONS,
@@ -165,7 +174,7 @@ def _advance_round(
         round_state.draw(_current_seat(round_state))
     elif phase is RoundPhase.AWAITING_RINSHAN_DRAW:
         round_state.draw_rinshan(_current_seat(round_state))
-    elif phase is RoundPhase.AWAITING_DISCARD:
+    elif phase in _CURRENT_SEAT_DECISION_PHASES:
         _apply_turn_choice(match_state, round_state, selectors)
     elif phase in _REACTION_PHASES:
         _resolve_reaction_choices(match_state, round_state, selectors)

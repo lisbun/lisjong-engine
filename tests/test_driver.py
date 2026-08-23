@@ -17,10 +17,11 @@ from _round_fixtures import (
 from lisjong_engine.action_descriptor import (
     ActionDescriptor,
     ChiActionDescriptor,
+    DiscardActionDescriptor,
     NineTerminalsActionDescriptor,
     PassActionDescriptor,
     PonActionDescriptor,
-    RiichiDiscardActionDescriptor,
+    RiichiActionDescriptor,
     RonActionDescriptor,
     TsumoActionDescriptor,
 )
@@ -33,6 +34,7 @@ from lisjong_engine.driver import (
 )
 from lisjong_engine.legal_action import AnkanLegalAction, KakanLegalAction
 from lisjong_engine.match_state import MatchPhase, MatchState
+from lisjong_engine.observation import ObservationDecisionKind
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.rules import RonResolutionPolicy, RuleSet
 from lisjong_engine.seat import Seat
@@ -563,7 +565,7 @@ class ForcedTransitionAndRiichiTest(unittest.TestCase):
         self.assertIs(round_state.phase, RoundPhase.FINISHED)
         self.assertIsNotNone(round_state.result)
 
-    def test_riichi_discard_progresses_through_the_public_descriptor(self) -> None:
+    def test_riichi_progresses_through_two_public_selector_decisions(self) -> None:
         round_state = dealt_state(
             hands=_RIICHI_HANDS,
             draws=("5z",),
@@ -571,11 +573,27 @@ class ForcedTransitionAndRiichiTest(unittest.TestCase):
         )
         round_state.draw(Seat.EAST)
         match = _match_with_active_round(round_state)
+        seen: list = []
 
-        def choose_riichi(_observation, options):
-            return _choose_type(options, RiichiDiscardActionDescriptor)
+        def choose_riichi_then_declaration(observation, options):
+            seen.append((observation.viewer_seat, observation.decision_kind))
+            if observation.decision_kind is ObservationDecisionKind.RIICHI_DISCARD:
+                return _choose_type(options, DiscardActionDescriptor)
+            return _choose_type(options, RiichiActionDescriptor)
 
-        _apply_turn_choice(match, round_state, _selectors(choose_riichi))
+        selectors = _selectors(choose_riichi_then_declaration)
+        _apply_turn_choice(match, round_state, selectors)
+
+        self.assertIs(round_state.phase, RoundPhase.AWAITING_RIICHI_DISCARD)
+        _apply_turn_choice(match, round_state, selectors)
+
+        self.assertEqual(
+            seen,
+            [
+                (Seat.EAST, ObservationDecisionKind.TURN),
+                (Seat.EAST, ObservationDecisionKind.RIICHI_DISCARD),
+            ],
+        )
         if round_state.phase is RoundPhase.AWAITING_REACTIONS:
             _resolve_reaction_choices(
                 match,
@@ -589,6 +607,101 @@ class ForcedTransitionAndRiichiTest(unittest.TestCase):
             )
 
         self.assertTrue(round_state.is_riichi_established(Seat.EAST))
+
+
+class RiichiDeclarationDiscardDriverTest(unittest.TestCase):
+    """宣言牌decisionをdriverが代行しないことを固定する。"""
+
+    def _riichi_selected(self, draws):
+        round_state = dealt_state(
+            hands=_RIICHI_HANDS,
+            draws=draws,
+            with_dead_wall=True,
+        )
+        round_state.draw(Seat.EAST)
+        match = _match_with_active_round(round_state)
+        _apply_turn_choice(
+            match,
+            round_state,
+            _selectors(
+                lambda _observation, options: _choose_type(
+                    options,
+                    RiichiActionDescriptor,
+                )
+            ),
+        )
+        return match, round_state
+
+    def test_calls_the_selector_even_for_a_single_declaration_discard(self) -> None:
+        match, round_state = self._riichi_selected(("5z",))
+        offered: list = []
+
+        def record(observation, options):
+            offered.append((observation.decision_kind, options))
+            return options[0]
+
+        _apply_turn_choice(match, round_state, _selectors(record))
+
+        self.assertEqual(len(offered), 1)
+        decision_kind, options = offered[0]
+        self.assertIs(decision_kind, ObservationDecisionKind.RIICHI_DISCARD)
+        self.assertEqual(len(options), 1)
+        self.assertEqual(len(round_state.discards(Seat.EAST)), 1)
+
+    def test_applies_the_declaration_discard_the_selector_returned(self) -> None:
+        """候補が複数でもdriverは選ばず、selectorが返した宣言牌を適用する。"""
+        match, round_state = self._riichi_selected(("2s", "5z", "6z"))
+        chosen: list = []
+
+        def choose_last(_observation, options):
+            chosen.append(options[-1])
+            return options[-1]
+
+        _apply_turn_choice(match, round_state, _selectors(choose_last))
+        discarded = round_state.discards(Seat.EAST)[0]
+        expected = chosen[0]
+
+        self.assertGreater(len(chosen), 0)
+        self.assertEqual(discarded.tile.tile_type, expected.tile.tile_type)
+        self.assertEqual(discarded.tile.is_red, expected.tile.is_red)
+        self.assertEqual(discarded.is_tsumogiri, expected.is_tsumogiri)
+
+    def test_an_unoffered_follow_up_choice_fails_closed(self) -> None:
+        match, round_state = self._riichi_selected(("5z",))
+        before = capture(round_state)
+
+        with self.assertRaises((TypeError, ValueError)):
+            _apply_turn_choice(
+                match,
+                round_state,
+                _selectors(
+                    lambda _observation, _options: NineTerminalsActionDescriptor()
+                ),
+            )
+
+        self.assertEqual(capture(round_state), before)
+        self.assertIs(round_state.phase, RoundPhase.AWAITING_RIICHI_DISCARD)
+
+    def test_the_same_two_stage_choices_reach_the_same_state(self) -> None:
+        """同じ初期stateと同じ2段階choiceからは、同じstate/eventへ到達する。"""
+
+        def run():
+            match, round_state = self._riichi_selected(("2s", "5z", "6z"))
+            _apply_turn_choice(
+                match,
+                round_state,
+                _selectors(lambda _observation, options: options[-1]),
+            )
+            return round_state
+
+        first = run()
+        second = run()
+
+        self.assertEqual(capture(first), capture(second))
+        self.assertEqual(
+            [type(event).__name__ for event in first.events],
+            [type(event).__name__ for event in second.events],
+        )
 
 
 class DriverResumeAndEndToEndTest(unittest.TestCase):

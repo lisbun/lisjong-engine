@@ -2,7 +2,12 @@
 
 `LegalAction`はengine内部のdomain値であり、外部protocolのaction idや
 adapter都合の整数handleへは変換しない。actionの同一性はdomain data
-（物理牌IDと宣言内容）だけで判別できる。
+（物理牌IDとaction種別）だけで判別できる。
+
+立直は`RiichiLegalAction`という宣言牌を持たない独立actionであり、
+宣言牌の選択は`AWAITING_RIICHI_DISCARD`での`DiscardLegalAction`という
+別decisionで行う。したがって`DiscardLegalAction`は打牌そのものだけを
+表し、立直宣言と結合しない。
 
 古いsnapshotから取り出したactionが偶然現在も合法な場合を区別するため、
 staleness判定は`LegalAction`自身ではなく`LegalActionSnapshot.revision`
@@ -16,13 +21,6 @@ from typing import TypeAlias
 
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.seat import Seat
-
-
-class DiscardDeclaration(Enum):
-    """打牌に伴う宣言。立直宣言の成立judgementはE2の責務とする。"""
-
-    NONE = "none"
-    RIICHI = "riichi"
 
 
 class ReactionOrigin(Enum):
@@ -61,12 +59,18 @@ def _normalize_tile_ids(
 @dataclass(frozen=True)
 class DiscardLegalAction:
     tile_id: int
-    declaration: DiscardDeclaration = DiscardDeclaration.NONE
 
     def __post_init__(self) -> None:
         _validate_tile_id(self.tile_id, "tile_id")
-        if not isinstance(self.declaration, DiscardDeclaration):
-            raise TypeError("declaration must be a DiscardDeclaration")
+
+
+@dataclass(frozen=True)
+class RiichiLegalAction:
+    """current seatが立直を選択することだけを表すaction。
+
+    宣言牌は持たない。適用後の`AWAITING_RIICHI_DISCARD`で、宣言牌を
+    選ぶ独立したdecisionを行う。
+    """
 
 
 @dataclass(frozen=True)
@@ -168,6 +172,7 @@ class DaiminkanLegalAction:
 # 未実装actionを渡された場合はfallbackせずillegalとして拒否する。
 LegalAction: TypeAlias = (
     DiscardLegalAction
+    | RiichiLegalAction
     | AnkanLegalAction
     | KakanLegalAction
     | TsumoLegalAction

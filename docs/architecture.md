@@ -126,7 +126,7 @@ Daiminkan等のpriorityはengine側のpureなresolverでdeterministicに確定�
 ### action identityとstaleness
 
 `LegalAction` はdomain値であり、process-globalなaction ID、UUID、adapter用の
-整数handleを持たない。actionの同一性は物理牌IDと宣言内容だけで判別する。
+整数handleを持たない。actionの同一性は物理牌IDとaction種別だけで判別する。
 
 一方、古いsnapshotから取り出したactionの検出には、局内の**state revision**を使う。
 revisionは局ローカルかつ単調増加で、同じ初期状態と同じaction sequenceからは常に
@@ -258,6 +258,9 @@ MatchState + active RoundState
                                             ↓
                                       CompletedMatch
 ```
+
+立直だけは、1手番のなかで2つのselector decisionへ分かれる（Issue #36）。詳細は
+「立直の2段階selector decision」を参照する。
 
 driverはPolicyではなく、既存state machine APIを正しい順序で呼ぶorchestrationである。
 AI、RandomPlayer、牌効率等の選択logicは所有せず、4席それぞれのselectorをcallerから
@@ -413,6 +416,62 @@ formatを新設しない。将来複数consumerが必要とする場合も、こ
 `pending_discard_source` はoptionalである。`LIVE_WALL` / `RINSHAN` はdraw由来の打牌を表し、
 `None` はChi / Pon後等のツモなし打牌を表す。provenanceが無いことを理由にreaction windowを
 失わない。
+
+### 立直の2段階selector decision
+
+立直は「立直を宣言すること」と「どの牌を宣言牌として打つか」という、2つの独立した
+selector decisionである（Issue #36）。
+
+**Riichi selection and declaration discard are separate selector decisions.**
+
+**The engine never chooses a declaration discard on behalf of an external selector.**
+
+```text
+AWAITING_DISCARD
+    ├─ DiscardLegalAction(tile_id)
+    ├─ AnkanLegalAction / KakanLegalAction
+    ├─ TsumoLegalAction / NineTerminalsLegalAction
+    └─ RiichiLegalAction()
+            ↓ selected
+AWAITING_RIICHI_DISCARD
+    └─ DiscardLegalAction(tile_id)  立直宣言可能な打牌だけ
+            ↓ selected
+discard + RiichiDeclaration
+            ↓
+reaction / riichi finalization
+```
+
+`RiichiLegalAction`（public boundaryでは`RiichiActionDescriptor`）は宣言牌を持たない。
+通常turnでは、立直宣言できる打牌が1件以上存在するときだけ、宣言牌候補の数に関わらず
+ちょうど1件提示する。`DiscardLegalAction`はriichi declarationと結合せず、打牌そのもの
+だけを表す。
+
+`AWAITING_RIICHI_DISCARD`中は、current seatを立直を選んだ席のまま保持し、手牌・河・
+drawn tile metadataを変更しない。他席はactionを持たず、current seatへ提示するのは
+`derive_riichi_discard_tiles()`が返す宣言牌の打牌だけである。通常の非立直打牌・槓・
+ツモ・九種九牌・再度の立直は混在させない。立直可能牌の判定は通常turnと同じ関数を
+唯一のsource of truthとして再利用する。
+
+`RiichiLegalAction`の適用は1つの成功したengine transactionであり、revisionを1だけ
+進める。したがって通常turnで取得した`LegalActionSnapshot` / `ActionProjection`は
+follow-up decisionではstaleであり、宣言牌は新しいrevisionのfresh snapshot / fresh
+`ActionProjection`から選ぶ。
+
+`RiichiDeclaration`は従来どおり「宣言牌を打った時点で確定する事実」である。したがって
+最初の`RiichiLegalAction`選択時には`RiichiDeclaration` / `RiichiDeclaredEvent` /
+`RiichiDeclaredProgress`を生成せず、供託も作らず、playerをriichi established扱いに
+しない。selector stagingのためだけのsynthetic progress factも追加しない。宣言牌が
+確定した時点で、既存のdeclaration → reaction → finalization pathへ接続する。
+
+follow-up decisionは`ObservationDecisionKind.RIICHI_DISCARD`として通常turnと区別する。
+consumerが候補集合やsnapshot差分から推測する必要はない。`ActionSelector` signature自体は
+変えず、同じseatのselectorが連続して2回呼ばれることを正規のcontractとする。宣言牌候補が
+1件しかない場合もdriverは自動選択せず、必ずselectorを呼ぶ。
+
+この分離は`lisjong-engine`自身のselector-facing execution semanticであり、`lisjong` /
+`lisjong-arena`へのdependencyを導入するものではない。立直可能条件、宣言牌へのRon /
+Chi / Pon / Daiminkanの既存成立semantics、`RiichiContribution`、visible score / riichi
+sticksへの反映timing、double riichi、一発、riichi failure、reaction priorityは変更しない。
 
 ### 槓と一発のconfirmation境界
 

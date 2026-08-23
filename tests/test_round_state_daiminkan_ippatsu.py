@@ -12,8 +12,8 @@ from _round_fixtures import (
 
 from lisjong_engine.legal_action import (
     DaiminkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
+    RiichiLegalAction,
 )
 from lisjong_engine.meld import Daiminkan
 from lisjong_engine.reaction import ReactionType
@@ -96,10 +96,11 @@ def _ippatsu_before_daiminkan_state():
         for tile in state.hand_tiles(Seat.EAST)
         if tile.tile_type == tile_type("7p")
     )
+    state.apply(Seat.EAST, RiichiLegalAction(), expected_revision=snapshot.revision)
     state.apply(
         Seat.EAST,
-        DiscardLegalAction(seven_pin.id, DiscardDeclaration.RIICHI),
-        expected_revision=snapshot.revision,
+        DiscardLegalAction(seven_pin.id),
+        expected_revision=state.revision,
     )
     resolve_all_pass(state)
 

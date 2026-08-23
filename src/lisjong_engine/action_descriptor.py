@@ -1,4 +1,10 @@
-"""Selectorへ公開する、物理牌identityを持たないaction descriptor。"""
+"""Selectorへ公開する、物理牌identityを持たないaction descriptor。
+
+立直は`RiichiActionDescriptor`という宣言牌を持たないchoiceであり、
+宣言牌はそれが選択された後のfollow-up decisionで、通常の
+`DiscardActionDescriptor`として選ぶ。engineがselectorの代わりに
+宣言牌を選ぶことはない。
+"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -40,12 +46,12 @@ class DiscardActionDescriptor:
 
 
 @dataclass(frozen=True)
-class RiichiDiscardActionDescriptor:
-    tile: PublicTile
-    is_tsumogiri: bool
+class RiichiActionDescriptor:
+    """立直を選択するというsemantic choiceだけを表すdescriptor。
 
-    def __post_init__(self) -> None:
-        _validate_tile_and_tsumogiri(self.tile, self.is_tsumogiri)
+    宣言牌は持たない。宣言牌は、これが選択された後のfollow-up decision
+    で通常の`DiscardActionDescriptor`として選ぶ。
+    """
 
 
 @dataclass(frozen=True)
@@ -149,7 +155,7 @@ class DaiminkanActionDescriptor:
 
 ActionDescriptor: TypeAlias = (
     DiscardActionDescriptor
-    | RiichiDiscardActionDescriptor
+    | RiichiActionDescriptor
     | AnkanActionDescriptor
     | KakanActionDescriptor
     | TsumoActionDescriptor
@@ -163,7 +169,7 @@ ActionDescriptor: TypeAlias = (
 
 ACTION_DESCRIPTOR_TYPES = (
     DiscardActionDescriptor,
-    RiichiDiscardActionDescriptor,
+    RiichiActionDescriptor,
     AnkanActionDescriptor,
     KakanActionDescriptor,
     TsumoActionDescriptor,

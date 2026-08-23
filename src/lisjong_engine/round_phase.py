@@ -4,6 +4,12 @@ from enum import Enum
 class RoundPhase(Enum):
     """局内の進行段階。
 
+    `AWAITING_RIICHI_DISCARD`は、current seatが立直を選択した一方、
+    宣言牌をまだ選んでいない中間状態を表す。この段階では手牌・河・
+    drawn tileを変更せず、current seatだけが立直宣言可能な打牌を選ぶ。
+    立直の宣言と宣言牌の選択が別のselector decisionであることを、独立
+    したphaseにすることで表現する。
+
     `AWAITING_WIN_FINALIZATION`は、反応windowでロンの成立者が確定した
     一方、点数確定・`RoundResult`構築・終局commitがまだ行われていない
     中間状態を表す。E2はここまでを担当し、E3がこの状態から`FINISHED`へ
@@ -14,6 +20,7 @@ class RoundPhase(Enum):
     UNDEALT = "undealt"
     AWAITING_DRAW = "awaiting_draw"
     AWAITING_DISCARD = "awaiting_discard"
+    AWAITING_RIICHI_DISCARD = "awaiting_riichi_discard"
     AWAITING_RINSHAN_DRAW = "awaiting_rinshan_draw"
     AWAITING_REACTIONS = "awaiting_reactions"
     AWAITING_KAKAN_REACTIONS = "awaiting_kakan_reactions"

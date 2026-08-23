@@ -91,9 +91,12 @@ class ObservationBuilderValidationTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             build_seat_observation(match, Seat.SOUTH)
 
-    def test_maps_only_the_four_decision_phases(self) -> None:
+    def test_maps_only_the_decision_phases(self) -> None:
         expected = {
             RoundPhase.AWAITING_DISCARD: ObservationDecisionKind.TURN,
+            RoundPhase.AWAITING_RIICHI_DISCARD: (
+                ObservationDecisionKind.RIICHI_DISCARD
+            ),
             RoundPhase.AWAITING_REACTIONS: (ObservationDecisionKind.DISCARD_REACTION),
             RoundPhase.AWAITING_KAKAN_REACTIONS: (
                 ObservationDecisionKind.KAKAN_REACTION

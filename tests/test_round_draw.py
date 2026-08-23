@@ -7,6 +7,7 @@ from _round_fixtures import (
     advance_to_seat,
     capture,
     dealt_state,
+    declare_riichi,
     discard,
     discard_drawn_tile,
     draw_and_discard,
@@ -21,7 +22,6 @@ from _round_fixtures import (
 from lisjong_engine.furiten import FuritenReason
 from lisjong_engine.legal_action import (
     AnkanLegalAction,
-    DiscardDeclaration,
     KakanLegalAction,
     NineTerminalsLegalAction,
     RonLegalAction,
@@ -465,13 +465,10 @@ class FourRiichiAbortiveDrawTest(unittest.TestCase):
 
     def _declare_riichi(self, state: RoundState, seat: Seat) -> None:
         drawn_tile = state.draw(seat)
+        declare_riichi(state, seat)
         snapshot = state.legal_actions(seat)
         action = next(
-            action
-            for action in snapshot.actions
-            if hasattr(action, "declaration")
-            and action.declaration is DiscardDeclaration.RIICHI
-            and action.tile_id == drawn_tile.id
+            action for action in snapshot.actions if action.tile_id == drawn_tile.id
         )
         state.apply(seat, action, expected_revision=snapshot.revision)
         if state.phase is RoundPhase.AWAITING_REACTIONS:
@@ -574,14 +571,13 @@ class FourRiichiAbortiveDrawTest(unittest.TestCase):
         for seat in (Seat.SOUTH, Seat.WEST):
             self._declare_riichi(state, seat)
         state.draw(Seat.NORTH)
+        declare_riichi(state, Seat.NORTH)
         snapshot = state.legal_actions(Seat.NORTH)
-        action = next(
-            action
-            for action in snapshot.actions
-            if hasattr(action, "declaration")
-            and action.declaration is DiscardDeclaration.RIICHI
+        state.apply(
+            Seat.NORTH,
+            snapshot.actions[0],
+            expected_revision=snapshot.revision,
         )
-        state.apply(Seat.NORTH, action, expected_revision=snapshot.revision)
         self.assertIs(state.phase, RoundPhase.AWAITING_REACTIONS)
         resolve_with(state, {Seat.EAST: ron_action(state, Seat.EAST)})
 

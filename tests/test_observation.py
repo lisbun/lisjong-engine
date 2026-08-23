@@ -37,10 +37,16 @@ def _observation(**overrides) -> SeatObservation:
 
 
 class ObservationDecisionKindTest(unittest.TestCase):
-    def test_has_only_the_four_decision_kinds(self) -> None:
+    def test_has_only_the_expected_decision_kinds(self) -> None:
         self.assertEqual(
             {kind.value for kind in ObservationDecisionKind},
-            {"turn", "discard_reaction", "kakan_reaction", "ankan_reaction"},
+            {
+                "turn",
+                "riichi_discard",
+                "discard_reaction",
+                "kakan_reaction",
+                "ankan_reaction",
+            },
         )
 
 

@@ -8,6 +8,7 @@ from _round_fixtures import (
     capture,
     daiminkan_action,
     dealt_state,
+    declare_riichi,
     discard,
     draw_and_discard,
     play_quiet_turn,
@@ -19,8 +20,6 @@ from _round_fixtures import (
 
 from lisjong_engine.legal_action import (
     AnkanLegalAction,
-    DiscardDeclaration,
-    DiscardLegalAction,
     KakanLegalAction,
     TsumoLegalAction,
 )
@@ -251,14 +250,9 @@ def _apply_tsumo(state: RoundState, seat: Seat) -> WinResult:
 
 def _declare_riichi(state: RoundState, seat: Seat) -> None:
     state.draw(seat)
+    declare_riichi(state, seat)
     snapshot = state.legal_actions(seat)
-    action = next(
-        action
-        for action in snapshot.actions
-        if isinstance(action, DiscardLegalAction)
-        and action.declaration is DiscardDeclaration.RIICHI
-    )
-    state.apply(seat, action, expected_revision=snapshot.revision)
+    state.apply(seat, snapshot.actions[0], expected_revision=snapshot.revision)
     if state.phase is RoundPhase.AWAITING_REACTIONS:
         resolve_all_pass(state)
 
@@ -298,12 +292,7 @@ def _kakan_ron_state(*, riichi_winner: bool = False) -> RoundState:
     discard(state, Seat.SOUTH, "1z")
     if riichi_winner:
         state.draw(Seat.WEST)
-        discard(
-            state,
-            Seat.WEST,
-            "9s",
-            declaration=DiscardDeclaration.RIICHI,
-        )
+        discard(state, Seat.WEST, "9s", declares_riichi=True)
         if state.phase is RoundPhase.AWAITING_REACTIONS:
             resolve_all_pass(state)
     else:

@@ -18,7 +18,14 @@ _SEAT_ORDER = tuple(Seat)
 
 
 class ObservationDecisionKind(Enum):
+    """decisionの種類。consumerが候補集合から推測しなくて済むようにする。
+
+    `RIICHI_DISCARD`は「立直は既に選択済みで、今は宣言牌を選ぶ」という
+    follow-up decisionを表し、通常turnの`TURN`と明確に区別する。
+    """
+
     TURN = "turn"
+    RIICHI_DISCARD = "riichi_discard"
     DISCARD_REACTION = "discard_reaction"
     KAKAN_REACTION = "kakan_reaction"
     ANKAN_REACTION = "ankan_reaction"

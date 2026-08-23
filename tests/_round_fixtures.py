@@ -12,11 +12,11 @@
 from lisjong_engine.legal_action import (
     ChiLegalAction,
     DaiminkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     LegalAction,
     PassLegalAction,
     PonLegalAction,
+    RiichiLegalAction,
     RonLegalAction,
 )
 from lisjong_engine.reaction import ReactionResolution
@@ -321,12 +321,40 @@ def daiminkan_action(state: RoundState, seat: Seat) -> DaiminkanLegalAction:
     return action_of_type(state, seat, DaiminkanLegalAction)
 
 
+def declare_riichi(state: RoundState, seat: Seat) -> None:
+    """立直を選択し、宣言牌decisionへ進める。宣言牌はまだ選ばない。"""
+    snapshot = state.legal_actions(seat)
+    state.apply(seat, RiichiLegalAction(), expected_revision=snapshot.revision)
+
+
+def _discard_tile(
+    state: RoundState,
+    seat: Seat,
+    target: Tile,
+    *,
+    declares_riichi: bool,
+) -> Tile:
+    """打牌を適用する。立直の場合だけ、先に立直選択decisionを済ませる。
+
+    宣言牌はcallerが指定したものをそのまま使い、helper側で選び直さない。
+    """
+    if declares_riichi:
+        declare_riichi(state, seat)
+    snapshot = state.legal_actions(seat)
+    state.apply(
+        seat,
+        DiscardLegalAction(target.id),
+        expected_revision=snapshot.revision,
+    )
+    return target
+
+
 def draw_and_discard(
     state: RoundState,
     seat: Seat,
     tile_name: str | None = None,
     *,
-    declaration: DiscardDeclaration = DiscardDeclaration.NONE,
+    declares_riichi: bool = False,
 ) -> Tile:
     """`seat`がツモり、指定した牌種（省略時はツモ切り）を打つ。"""
     drawn_tile = state.draw(seat)
@@ -337,13 +365,7 @@ def draw_and_discard(
         target = next(
             tile for tile in state.hand_tiles(seat) if tile.tile_type == expected
         )
-    snapshot = state.legal_actions(seat)
-    state.apply(
-        seat,
-        DiscardLegalAction(target.id, declaration),
-        expected_revision=snapshot.revision,
-    )
-    return target
+    return _discard_tile(state, seat, target, declares_riichi=declares_riichi)
 
 
 def discard_drawn_tile(state: RoundState, seat: Seat) -> Tile:
@@ -365,18 +387,12 @@ def discard(
     seat: Seat,
     tile_name: str,
     *,
-    declaration: DiscardDeclaration = DiscardDeclaration.NONE,
+    declares_riichi: bool = False,
 ) -> Tile:
     """ツモを伴わない打牌（鳴き直後など）を行う。"""
     expected = tile_type(tile_name)
     target = next(tile for tile in state.hand_tiles(seat) if tile.tile_type == expected)
-    snapshot = state.legal_actions(seat)
-    state.apply(
-        seat,
-        DiscardLegalAction(target.id, declaration),
-        expected_revision=snapshot.revision,
-    )
-    return target
+    return _discard_tile(state, seat, target, declares_riichi=declares_riichi)
 
 
 def all_pass_choices(state: RoundState) -> dict[Seat, LegalAction]:

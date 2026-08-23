@@ -21,7 +21,7 @@ from lisjong_engine.action_descriptor import (
     ChiActionDescriptor,
     DiscardActionDescriptor,
     PassActionDescriptor,
-    RiichiDiscardActionDescriptor,
+    RiichiActionDescriptor,
     RonActionDescriptor,
 )
 from lisjong_engine.driver import _advance_round, _settle_round, run_hanchan
@@ -35,6 +35,7 @@ from lisjong_engine.match_state import (
     MatchState,
     RoundPosition,
 )
+from lisjong_engine.observation import ObservationDecisionKind
 from lisjong_engine.player_state import PlayerState
 from lisjong_engine.public_state import PublicTile
 from lisjong_engine.reaction import ReactionResolution
@@ -333,11 +334,16 @@ def _chi_or_pass_selector(
 
 
 def _riichi_tsumogiri_or_pass_selector(
-    _observation, options: tuple[ActionDescriptor, ...]
+    observation, options: tuple[ActionDescriptor, ...]
 ) -> ActionDescriptor:
+    """立直を選び、続く宣言牌decisionでツモ切りを選ぶ2段階selector。"""
     for option in options:
-        if isinstance(option, RiichiDiscardActionDescriptor) and option.is_tsumogiri:
+        if isinstance(option, RiichiActionDescriptor):
             return option
+    if observation.decision_kind is ObservationDecisionKind.RIICHI_DISCARD:
+        for option in options:
+            if isinstance(option, DiscardActionDescriptor) and option.is_tsumogiri:
+                return option
     for option in options:
         if isinstance(option, PassActionDescriptor):
             return option
@@ -447,6 +453,10 @@ class FullOrderedSequenceTest(unittest.TestCase):
 
         # 誰も反応できないため、宣言と成立は打牌と同じtransaction内で確定する。
         cursor = _advance_round(match, state, selectors, delivered.extend, 0)  # draw
+        cursor = _advance_round(
+            match, state, selectors, delivered.extend, cursor
+        )  # riichi selection alone delivers nothing
+        self.assertEqual(delivered, [])
         _advance_round(match, state, selectors, delivered.extend, cursor)  # discard
 
         self.assertEqual(
@@ -469,6 +479,10 @@ class FullOrderedSequenceTest(unittest.TestCase):
         }
 
         cursor = _advance_round(match, state, selectors, delivered.extend, 0)  # draw
+        cursor = _advance_round(
+            match, state, selectors, delivered.extend, cursor
+        )  # riichi selection alone delivers nothing
+        self.assertEqual(delivered, [])
         cursor = _advance_round(
             match, state, selectors, delivered.extend, cursor
         )  # discard + declaration, opens the reaction window

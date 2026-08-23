@@ -5,7 +5,6 @@ from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
     DaiminkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
     LegalActionSnapshot,
@@ -13,6 +12,7 @@ from lisjong_engine.legal_action import (
     PassLegalAction,
     PonLegalAction,
     ReactionOrigin,
+    RiichiLegalAction,
     RonLegalAction,
     TsumoLegalAction,
     is_legal_action,
@@ -25,6 +25,7 @@ class LegalActionValueTest(unittest.TestCase):
     def test_covers_the_discriminated_union_members(self) -> None:
         actions = (
             DiscardLegalAction(0),
+            RiichiLegalAction(),
             AnkanLegalAction((3, 2, 1, 0)),
             KakanLegalAction(4),
             TsumoLegalAction(),
@@ -55,13 +56,19 @@ class LegalActionValueTest(unittest.TestCase):
         self.assertEqual(DiscardLegalAction(3), DiscardLegalAction(3))
         self.assertEqual(hash(DiscardLegalAction(3)), hash(DiscardLegalAction(3)))
         self.assertNotEqual(DiscardLegalAction(3), DiscardLegalAction(4))
-        self.assertNotEqual(
-            DiscardLegalAction(3),
-            DiscardLegalAction(3, DiscardDeclaration.RIICHI),
+
+    def test_discard_carries_no_riichi_declaration(self) -> None:
+        """打牌actionは打牌そのものだけを表し、立直宣言と結合しない。"""
+        self.assertEqual(
+            tuple(DiscardLegalAction(3).__dataclass_fields__),
+            ("tile_id",),
         )
 
-    def test_discard_defaults_to_no_declaration(self) -> None:
-        self.assertIs(DiscardLegalAction(3).declaration, DiscardDeclaration.NONE)
+    def test_riichi_is_an_action_without_a_declaration_tile(self) -> None:
+        """立直は宣言牌を持たない独立actionであり、値としても一意である。"""
+        self.assertEqual(RiichiLegalAction(), RiichiLegalAction())
+        self.assertEqual(hash(RiichiLegalAction()), hash(RiichiLegalAction()))
+        self.assertEqual(tuple(RiichiLegalAction().__dataclass_fields__), ())
 
     def test_normalizes_consumed_tile_ids_into_sorted_tuples(self) -> None:
         self.assertEqual(ChiLegalAction(7, (9, 8)).consumed_tile_ids, (8, 9))
