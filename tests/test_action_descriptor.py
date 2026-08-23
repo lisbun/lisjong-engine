@@ -11,7 +11,7 @@ from lisjong_engine.action_descriptor import (
     NineTerminalsActionDescriptor,
     PassActionDescriptor,
     PonActionDescriptor,
-    RiichiDiscardActionDescriptor,
+    RiichiActionDescriptor,
     RonActionDescriptor,
     TsumoActionDescriptor,
     is_action_descriptor,
@@ -34,7 +34,7 @@ RED_FIVE_PIN = _tile(TileCategory.PINZU, 5, red=True)
 def _all_descriptors():
     return (
         DiscardActionDescriptor(ONE_MAN, False),
-        RiichiDiscardActionDescriptor(ONE_MAN, True),
+        RiichiActionDescriptor(),
         AnkanActionDescriptor((ONE_MAN,) * 4),
         KakanActionDescriptor(ONE_MAN),
         TsumoActionDescriptor(ONE_MAN),
@@ -104,9 +104,24 @@ class ActionDescriptorValueTest(unittest.TestCase):
             DiscardActionDescriptor(ONE_MAN, False),
             DiscardActionDescriptor(ONE_MAN, True),
         )
-        self.assertNotEqual(
-            DiscardActionDescriptor(ONE_MAN, False),
-            RiichiDiscardActionDescriptor(ONE_MAN, False),
+
+
+class RiichiActionDescriptorTest(unittest.TestCase):
+    def test_carries_no_declaration_tile(self) -> None:
+        """立直choiceは宣言牌を持たない。宣言牌は別decisionで選ぶ。"""
+        self.assertEqual(fields(RiichiActionDescriptor), ())
+        self.assertEqual(RiichiActionDescriptor(), RiichiActionDescriptor())
+
+    def test_riichi_discard_descriptor_is_not_part_of_the_contract(self) -> None:
+        """宣言牌と結合したdescriptorはcanonical contractへ残さない。"""
+        import lisjong_engine.action_descriptor as module
+
+        self.assertFalse(hasattr(module, "RiichiDiscardActionDescriptor"))
+        self.assertTrue(
+            all(
+                descriptor_type.__name__ != "RiichiDiscardActionDescriptor"
+                for descriptor_type in ACTION_DESCRIPTOR_TYPES
+            )
         )
 
 

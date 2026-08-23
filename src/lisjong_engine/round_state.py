@@ -49,6 +49,13 @@ validationまたは遷移が失敗した場合、本体へpartial mutationを残
 `finalize_pending_win()`がscoringと終局commitを行う。ツモも合法手として
 strictに再評価してから同じterminal commitを使う。
 
+立直は「立直を選ぶ」と「宣言牌を打つ」の2つの独立したdecisionである。
+`RiichiLegalAction`の適用は`AWAITING_RIICHI_DISCARD`へ進むだけで、手牌・
+河・drawn tile・供託・立直成立のいずれも変更しない。`RiichiDeclaration`
+は従来どおり宣言牌を打った時点で確定する事実であり、その打牌から既存の
+反応・成立judgement pathへ接続する。engineがselectorの代わりに宣言牌を
+選ぶことはない。
+
 九種九牌はplayerが選択したときだけ`AbortiveDrawResult`へ終局するturn
 actionとして扱う。四風連打・四家立直・四槓散了・荒牌流局は、成立timing
 （reaction windowの解決後、または槓の実際の確定直後）でだけ自動判定し、
@@ -70,13 +77,13 @@ from lisjong_engine.furiten import FuritenReason
 from lisjong_engine.kan import PendingAnkan, PendingKakan, count_quads
 from lisjong_engine.legal_action import (
     AnkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
     LegalAction,
     LegalActionSnapshot,
     NineTerminalsLegalAction,
     ReactionOrigin,
+    RiichiLegalAction,
     TsumoLegalAction,
     is_legal_action,
 )
@@ -84,6 +91,7 @@ from lisjong_engine.legal_actions import (
     RoundView,
     derive_legal_actions,
     derive_nine_terminals_eligibility,
+    derive_riichi_discard_tiles,
     derive_tsumo_claim,
     dora_indicator_state,
 )
@@ -145,6 +153,7 @@ _DEAL_BLOCK_COUNT = 3
 # へ進む。
 _DRAWN_TILE_HOLDING_PHASES = (
     RoundPhase.AWAITING_DISCARD,
+    RoundPhase.AWAITING_RIICHI_DISCARD,
     RoundPhase.AWAITING_KAKAN_REACTIONS,
     RoundPhase.AWAITING_ANKAN_REACTIONS,
 )
@@ -154,6 +163,7 @@ _DRAWN_TILE_HOLDING_PHASES = (
 _CURRENT_SEAT_PHASES = (
     RoundPhase.AWAITING_DRAW,
     RoundPhase.AWAITING_DISCARD,
+    RoundPhase.AWAITING_RIICHI_DISCARD,
     RoundPhase.AWAITING_RINSHAN_DRAW,
     RoundPhase.AWAITING_KAKAN_REACTIONS,
     RoundPhase.AWAITING_ANKAN_REACTIONS,
@@ -167,6 +177,7 @@ _REACTION_PHASES = (
 
 _TURN_ACTION_TYPES = (
     DiscardLegalAction,
+    RiichiLegalAction,
     AnkanLegalAction,
     KakanLegalAction,
     TsumoLegalAction,
@@ -680,6 +691,8 @@ class RoundState:
 
         if isinstance(action, DiscardLegalAction):
             self._apply_discard(seat, action)
+        elif isinstance(action, RiichiLegalAction):
+            self._apply_riichi(seat)
         elif isinstance(action, AnkanLegalAction):
             self._apply_ankan(seat, action)
         elif isinstance(action, KakanLegalAction):
@@ -883,10 +896,28 @@ class RoundState:
         self._finish_round(transition, result)
         self._commit(transition)
 
+    def _apply_riichi(self, seat: Seat) -> None:
+        """立直の選択だけをcommitし、宣言牌decisionへ進める。
+
+        この時点では宣言牌が確定していないため、手牌・河・drawn tile・
+        供託・立直成立のいずれも変更せず、`RiichiDeclaration`も作らない。
+        `RiichiDeclaration`は宣言牌を打った時点で確定する事実である。
+        """
+        transition = self._begin()
+        if not derive_riichi_discard_tiles(self._transition_view(transition), seat):
+            # 合法な宣言牌が存在しない`AWAITING_RIICHI_DISCARD`は正常状態
+            # として許容しない。
+            raise RoundInvariantError(
+                "a riichi selection requires at least one declaration discard"
+            )
+        transition.phase = RoundPhase.AWAITING_RIICHI_DISCARD
+        self._commit(transition)
+
     def _apply_discard(self, seat: Seat, action: DiscardLegalAction) -> None:
         transition = self._begin()
         player = transition.players[seat]
-        declares_riichi = action.declaration is DiscardDeclaration.RIICHI
+        # 宣言牌かどうかは、この打牌がどのdecisionで選ばれたかで決まる。
+        declares_riichi = self._phase is RoundPhase.AWAITING_RIICHI_DISCARD
         was_first_discard = not player.has_discarded
         had_prior_call = self.has_meld_occurred
 

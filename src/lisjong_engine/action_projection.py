@@ -1,4 +1,9 @@
-"""内部LegalActionをsnapshot-localな公開choiceへ射影する。"""
+"""内部LegalActionをsnapshot-localな公開choiceへ射影する。
+
+立直は宣言牌を持たない`RiichiActionDescriptor`として1件だけ公開する。
+宣言牌は`AWAITING_RIICHI_DISCARD`のfresh snapshotから作った別の
+`ActionProjection`で、通常の`DiscardActionDescriptor`として選ぶ。
+"""
 
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
@@ -14,7 +19,7 @@ from lisjong_engine.action_descriptor import (
     NineTerminalsActionDescriptor,
     PassActionDescriptor,
     PonActionDescriptor,
-    RiichiDiscardActionDescriptor,
+    RiichiActionDescriptor,
     RonActionDescriptor,
     TsumoActionDescriptor,
 )
@@ -22,7 +27,6 @@ from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
     DaiminkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
     LegalAction,
@@ -31,6 +35,7 @@ from lisjong_engine.legal_action import (
     PassLegalAction,
     PonLegalAction,
     ReactionOrigin,
+    RiichiLegalAction,
     RonLegalAction,
     TsumoLegalAction,
     is_legal_action,
@@ -43,7 +48,7 @@ from lisjong_engine.tile import Tile
 _SEAT_INDEX = {seat: index for index, seat in enumerate(Seat)}
 _DESCRIPTOR_KIND = {
     DiscardActionDescriptor: 0,
-    RiichiDiscardActionDescriptor: 1,
+    RiichiActionDescriptor: 1,
     AnkanActionDescriptor: 2,
     KakanActionDescriptor: 3,
     TsumoActionDescriptor: 4,
@@ -221,9 +226,9 @@ def _descriptor_from_legal_action(
     if isinstance(action, DiscardLegalAction):
         tile = _hand_public_tile(round_state, viewer_seat, action.tile_id)
         is_tsumogiri = round_state.drawn_tile_id == action.tile_id
-        if action.declaration is DiscardDeclaration.RIICHI:
-            return RiichiDiscardActionDescriptor(tile, is_tsumogiri)
         return DiscardActionDescriptor(tile, is_tsumogiri)
+    if isinstance(action, RiichiLegalAction):
+        return RiichiActionDescriptor()
 
     if isinstance(action, AnkanLegalAction):
         return AnkanActionDescriptor(
@@ -277,11 +282,10 @@ def _tile_key(tile: PublicTile) -> tuple[int, bool]:
 
 def _public_action_sort_key(descriptor: ActionDescriptor) -> tuple:
     kind = _DESCRIPTOR_KIND[type(descriptor)]
-    if isinstance(
-        descriptor,
-        (DiscardActionDescriptor, RiichiDiscardActionDescriptor),
-    ):
+    if isinstance(descriptor, DiscardActionDescriptor):
         return (kind, _tile_key(descriptor.tile), descriptor.is_tsumogiri)
+    if isinstance(descriptor, RiichiActionDescriptor):
+        return (kind,)
     if isinstance(descriptor, AnkanActionDescriptor):
         return (kind, tuple(_tile_key(tile) for tile in descriptor.tiles))
     if isinstance(descriptor, (KakanActionDescriptor, TsumoActionDescriptor)):
@@ -305,7 +309,10 @@ def _internal_action_sort_key(action: LegalAction) -> tuple[int, ...]:
         return action.tile_ids
     if isinstance(action, KakanLegalAction):
         return (action.added_tile_id,)
-    if isinstance(action, (TsumoLegalAction, NineTerminalsLegalAction)):
+    if isinstance(
+        action,
+        (RiichiLegalAction, TsumoLegalAction, NineTerminalsLegalAction),
+    ):
         return ()
     if isinstance(action, (PassLegalAction, RonLegalAction)):
         return (action.target_tile_id,)

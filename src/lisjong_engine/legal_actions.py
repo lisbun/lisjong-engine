@@ -10,11 +10,18 @@ commit済みstateからこのviewを組み立てて渡すだけであり、本mo
 phaseごとの導出は次のpure関数へ分ける。
 
 ```text
-derive_turn_actions              打牌・立直宣言打牌・暗槓・加槓
-derive_discard_reaction_actions  パス・ロン・ポン・チー・大明槓
-derive_kakan_reaction_actions    パス・ロン（槍槓）
-derive_ankan_reaction_actions    パス・ロン（国士無双限定の槍槓）
+derive_turn_actions                        打牌・立直・暗槓・加槓
+derive_riichi_declaration_discard_actions  立直宣言牌の打牌
+derive_discard_reaction_actions            パス・ロン・ポン・チー・大明槓
+derive_kakan_reaction_actions              パス・ロン（槍槓）
+derive_ankan_reaction_actions              パス・ロン（国士無双限定の槍槓）
 ```
+
+立直は宣言と宣言牌打牌の2段階decisionである。通常turnでは宣言牌を
+持たない`RiichiLegalAction`をちょうど1件だけ提示し、宣言牌は
+`AWAITING_RIICHI_DISCARD`のfollow-up decisionで選ぶ。どちらの段階も
+`derive_riichi_discard_tiles()`という同じ判定を唯一のsource of truth
+として使う。
 
 ツモ和了・九種九牌はどちらもshared winning finalization / draw resolutionへ
 immutable factを渡してprobeする。
@@ -36,7 +43,6 @@ from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
     DaiminkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
     LegalAction,
@@ -44,6 +50,7 @@ from lisjong_engine.legal_action import (
     PassLegalAction,
     PonLegalAction,
     ReactionOrigin,
+    RiichiLegalAction,
     RonLegalAction,
     TsumoLegalAction,
 )
@@ -129,6 +136,10 @@ def derive_legal_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]
         if seat is not view.current_seat:
             return ()
         return derive_turn_actions(view, seat)
+    if view.phase is RoundPhase.AWAITING_RIICHI_DISCARD:
+        if seat is not view.current_seat:
+            return ()
+        return derive_riichi_declaration_discard_actions(view, seat)
     if view.phase is RoundPhase.AWAITING_REACTIONS:
         return derive_discard_reaction_actions(view, seat)
     if view.phase is RoundPhase.AWAITING_KAKAN_REACTIONS:
@@ -139,16 +150,18 @@ def derive_legal_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]
 
 
 def derive_turn_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]:
-    """打牌・立直宣言打牌・暗槓・加槓・ツモ・九種九牌を、この順序で列挙する。"""
+    """打牌・立直・暗槓・加槓・ツモ・九種九牌を、この順序で列挙する。
+
+    立直は宣言牌候補の数に関わらずちょうど1件の`RiichiLegalAction`として
+    提示する。宣言牌が1件も存在しない場合は立直自体を提示しない。
+    """
     player = view.players[seat]
     hand_tiles = _sorted_hand(player)
     actions: list[LegalAction] = [
         DiscardLegalAction(tile.id) for tile in derive_discardable_tiles(view, seat)
     ]
-    actions.extend(
-        DiscardLegalAction(tile.id, DiscardDeclaration.RIICHI)
-        for tile in derive_riichi_discard_tiles(view, seat)
-    )
+    if derive_riichi_discard_tiles(view, seat):
+        actions.append(RiichiLegalAction())
 
     if view.drawn_tile_id is not None and view.can_draw_rinshan:
         actions.extend(_derive_ankan_actions(view, seat, hand_tiles))
@@ -163,6 +176,21 @@ def derive_turn_actions(view: RoundView, seat: Seat) -> tuple[LegalAction, ...]:
     if derive_nine_terminals_eligibility(view, seat):
         actions.append(NineTerminalsLegalAction())
     return tuple(actions)
+
+
+def derive_riichi_declaration_discard_actions(
+    view: RoundView,
+    seat: Seat,
+) -> tuple[LegalAction, ...]:
+    """立直を選択済みの席が打てる宣言牌を、打牌actionとして列挙する。
+
+    提示するのは立直宣言可能な打牌だけであり、通常の打牌候補・槓・ツモ・
+    九種九牌・再度の立直は混在させない。判定は`derive_riichi_discard_tiles()`
+    を唯一のsource of truthとして再利用する。
+    """
+    return tuple(
+        DiscardLegalAction(tile.id) for tile in derive_riichi_discard_tiles(view, seat)
+    )
 
 
 def _is_global_first_uninterrupted_turn(view: RoundView, seat: Seat) -> bool:

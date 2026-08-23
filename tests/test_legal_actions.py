@@ -9,19 +9,22 @@ from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
     DaiminkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
+    NineTerminalsLegalAction,
     PassLegalAction,
     PonLegalAction,
     ReactionOrigin,
+    RiichiLegalAction,
     RonLegalAction,
+    TsumoLegalAction,
 )
 from lisjong_engine.legal_actions import (
     RoundView,
     derive_discardable_tiles,
     derive_kuikae_forbidden_tile_types,
     derive_legal_actions,
+    derive_riichi_declaration_discard_actions,
     derive_riichi_discard_tiles,
 )
 from lisjong_engine.meld import Ankan, Chi, Kakan, Pon
@@ -45,6 +48,10 @@ _TANYAO_TENPAI = tiles(
     "2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "5p", "6p", "2s", "2s"
 )
 _SEVEN_PIN = tiles("7p", "7p", "7p", "7p")
+# 打牌候補の多くが聴牌を保つため、立直宣言牌候補が複数になる手。
+_MULTI_DECLARATION_HAND = tiles(
+    "2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "5p", "6p", "7p", "3s", "3s"
+)
 # `_TANYAO_TENPAI`と物理牌が衝突しない、鳴き用の別copy。
 _CHI_TILES = tiles("1m", "2m", "2m", "3m", "3m")
 _DEAD_DRAW = tiles("9s")[0]
@@ -116,16 +123,19 @@ class DeriveTurnActionsTest(unittest.TestCase):
         overrides.setdefault("drawn_tile_id", _DEAD_DRAW.id)
         return _view(players=_players(east=player), **overrides)
 
+    def _multi_declaration_view(self, **overrides) -> RoundView:
+        """立直宣言牌の候補が複数存在する局面を作る。"""
+        player = PlayerState(Seat.EAST, _MULTI_DECLARATION_HAND)
+        overrides.setdefault("drawn_tile_id", _MULTI_DECLARATION_HAND[-1].id)
+        return _view(players=_players(east=player), **overrides)
+
     def test_lists_every_hand_tile_as_a_discard_candidate(self) -> None:
         view = self._tenpai_view()
 
         actions = derive_legal_actions(view, Seat.EAST)
 
         discards = tuple(
-            action
-            for action in actions
-            if isinstance(action, DiscardLegalAction)
-            and action.declaration is DiscardDeclaration.NONE
+            action for action in actions if isinstance(action, DiscardLegalAction)
         )
         self.assertEqual(len(discards), 14)
         self.assertEqual(
@@ -148,19 +158,70 @@ class DeriveTurnActionsTest(unittest.TestCase):
                 view = self._tenpai_view(phase=phase, drawn_tile_id=None)
                 self.assertEqual(derive_legal_actions(view, Seat.EAST), ())
 
-    def test_offers_a_riichi_declaration_for_every_tenpai_discard(self) -> None:
+    def test_offers_exactly_one_riichi_choice_without_a_declaration_tile(
+        self,
+    ) -> None:
+        """立直は宣言牌を持たない1件のactionとして提示する。"""
         view = self._tenpai_view()
 
         riichi_tiles = derive_riichi_discard_tiles(view, Seat.EAST)
+        actions = derive_legal_actions(view, Seat.EAST)
 
         self.assertEqual(
             tuple(tile.id for tile in riichi_tiles),
             (_DEAD_DRAW.id,),
         )
-        self.assertIn(
-            DiscardLegalAction(_DEAD_DRAW.id, DiscardDeclaration.RIICHI),
-            derive_legal_actions(view, Seat.EAST),
+        self.assertEqual(
+            tuple(
+                action for action in actions if isinstance(action, RiichiLegalAction)
+            ),
+            (RiichiLegalAction(),),
         )
+
+    def test_offers_one_riichi_choice_even_with_several_declaration_tiles(
+        self,
+    ) -> None:
+        """宣言牌候補が複数でも、立直choiceは1件にcollapseする。"""
+        view = self._multi_declaration_view()
+
+        riichi_tiles = derive_riichi_discard_tiles(view, Seat.EAST)
+        actions = derive_legal_actions(view, Seat.EAST)
+
+        self.assertGreater(len(riichi_tiles), 1)
+        self.assertEqual(
+            len(
+                tuple(
+                    action
+                    for action in actions
+                    if isinstance(action, RiichiLegalAction)
+                )
+            ),
+            1,
+        )
+
+    def test_offers_no_riichi_choice_without_any_declaration_tile(self) -> None:
+        below = {seat: _RULES.starting_points for seat in Seat}
+        below[Seat.EAST] = _RULES.riichi_minimum_points - 1
+
+        view = self._tenpai_view(round_start_points=below)
+
+        self.assertEqual(derive_riichi_discard_tiles(view, Seat.EAST), ())
+        self.assertEqual(
+            tuple(
+                action
+                for action in derive_legal_actions(view, Seat.EAST)
+                if isinstance(action, RiichiLegalAction)
+            ),
+            (),
+        )
+
+    def test_normal_discards_and_the_riichi_choice_share_one_decision(self) -> None:
+        actions = derive_legal_actions(self._tenpai_view(), Seat.EAST)
+
+        self.assertTrue(
+            any(isinstance(action, DiscardLegalAction) for action in actions)
+        )
+        self.assertIn(RiichiLegalAction(), actions)
 
     def test_a_hand_below_the_minimum_points_cannot_declare_riichi(self) -> None:
         below = {seat: _RULES.starting_points for seat in Seat}
@@ -222,6 +283,21 @@ class DeriveTurnActionsTest(unittest.TestCase):
         )
         self.assertEqual(derive_riichi_discard_tiles(view, Seat.EAST), ())
 
+    def _ankan_and_riichi_view(self, **overrides) -> RoundView:
+        """立直も暗槓も選べる局面を作る。"""
+        player = PlayerState(Seat.EAST, (*_TANYAO_TENPAI[:10], *_SEVEN_PIN))
+        overrides.setdefault("drawn_tile_id", _SEVEN_PIN[3].id)
+        return _view(players=_players(east=player), **overrides)
+
+    def test_offers_a_riichi_choice_alongside_a_kan_choice(self) -> None:
+        """立直choiceは他のturn actionと同じdecisionへ共存できる。"""
+        view = self._ankan_and_riichi_view()
+
+        actions = derive_legal_actions(view, Seat.EAST)
+
+        self.assertIn(RiichiLegalAction(), actions)
+        self.assertTrue(any(isinstance(a, AnkanLegalAction) for a in actions))
+
     def test_offers_an_ankan_for_a_hand_with_four_copies(self) -> None:
         hand = (*_TANYAO_TENPAI[:10], *_SEVEN_PIN)
         player = PlayerState(Seat.EAST, hand)
@@ -278,6 +354,92 @@ class DeriveTurnActionsTest(unittest.TestCase):
                 isinstance(action, KakanLegalAction)
                 for action in derive_legal_actions(view, Seat.EAST)
             )
+        )
+
+
+class DeriveRiichiDeclarationDiscardActionsTest(unittest.TestCase):
+    """立直選択後のfollow-up decisionは、宣言牌の打牌だけを提示する。"""
+
+    def _view_awaiting_riichi_discard(self, hand, drawn_tile_id) -> RoundView:
+        player = PlayerState(Seat.EAST, hand)
+        return _view(
+            phase=RoundPhase.AWAITING_RIICHI_DISCARD,
+            players=_players(east=player),
+            drawn_tile_id=drawn_tile_id,
+        )
+
+    def test_offers_only_the_declaration_discards_to_the_current_seat(self) -> None:
+        hand = (*_TANYAO_TENPAI[:10], *_SEVEN_PIN)
+        view = self._view_awaiting_riichi_discard(hand, _SEVEN_PIN[3].id)
+
+        actions = derive_legal_actions(view, Seat.EAST)
+        declaration_tiles = derive_riichi_discard_tiles(view, Seat.EAST)
+
+        self.assertNotEqual(actions, ())
+        self.assertEqual(
+            actions,
+            tuple(DiscardLegalAction(tile.id) for tile in declaration_tiles),
+        )
+
+    def test_mixes_in_no_other_turn_action(self) -> None:
+        """通常の非立直打牌・槓・ツモ・九種九牌・再度の立直を混ぜない。"""
+        hand = (*_TANYAO_TENPAI[:10], *_SEVEN_PIN)
+        turn_view = _view(
+            players=_players(east=PlayerState(Seat.EAST, hand)),
+            drawn_tile_id=_SEVEN_PIN[3].id,
+        )
+        follow_up = self._view_awaiting_riichi_discard(hand, _SEVEN_PIN[3].id)
+
+        turn_actions = derive_legal_actions(turn_view, Seat.EAST)
+        actions = derive_legal_actions(follow_up, Seat.EAST)
+
+        self.assertTrue(any(isinstance(a, AnkanLegalAction) for a in turn_actions))
+        self.assertIn(RiichiLegalAction(), turn_actions)
+        self.assertLess(len(actions), len(turn_actions))
+        self.assertTrue(
+            all(isinstance(action, DiscardLegalAction) for action in actions)
+        )
+        for excluded in (
+            RiichiLegalAction,
+            AnkanLegalAction,
+            KakanLegalAction,
+            TsumoLegalAction,
+            NineTerminalsLegalAction,
+        ):
+            with self.subTest(excluded=excluded.__name__):
+                self.assertFalse(
+                    any(isinstance(action, excluded) for action in actions)
+                )
+
+    def test_excludes_discards_that_do_not_keep_tenpai(self) -> None:
+        hand = (*_TANYAO_TENPAI, _DEAD_DRAW)
+        view = self._view_awaiting_riichi_discard(hand, _DEAD_DRAW.id)
+
+        actions = derive_legal_actions(view, Seat.EAST)
+
+        self.assertEqual(actions, (DiscardLegalAction(_DEAD_DRAW.id),))
+
+    def test_offers_nothing_to_any_other_seat(self) -> None:
+        hand = (*_TANYAO_TENPAI, _DEAD_DRAW)
+        view = self._view_awaiting_riichi_discard(hand, _DEAD_DRAW.id)
+
+        for seat in (Seat.SOUTH, Seat.WEST, Seat.NORTH):
+            with self.subTest(seat=seat):
+                self.assertEqual(derive_legal_actions(view, seat), ())
+
+    def test_reuses_the_shared_declaration_tile_derivation(self) -> None:
+        """判定は`derive_riichi_discard_tiles()`と同じsource of truthを使う。"""
+        view = self._view_awaiting_riichi_discard(
+            _MULTI_DECLARATION_HAND,
+            _MULTI_DECLARATION_HAND[-1].id,
+        )
+
+        self.assertEqual(
+            derive_riichi_declaration_discard_actions(view, Seat.EAST),
+            tuple(
+                DiscardLegalAction(tile.id)
+                for tile in derive_riichi_discard_tiles(view, Seat.EAST)
+            ),
         )
 
 

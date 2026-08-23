@@ -36,13 +36,13 @@ from lisjong_engine.furiten import FuritenReason
 from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
     NineTerminalsLegalAction,
     PassLegalAction,
     PonLegalAction,
     ReactionOrigin,
+    RiichiLegalAction,
     RonLegalAction,
     TsumoLegalAction,
 )
@@ -631,18 +631,16 @@ class RoundStateRejectionTest(unittest.TestCase):
 
         self.assertEqual(_capture(state), original)
 
-    def test_rejects_a_declaration_that_is_not_generated_yet(self) -> None:
+    def test_rejects_a_riichi_that_is_not_generated_yet(self) -> None:
         state = self._drawn_state()
         snapshot = state.legal_actions(Seat.EAST)
         original = _capture(state)
 
+        self.assertNotIn(RiichiLegalAction(), snapshot.actions)
         with self.assertRaises(IllegalActionError):
             state.apply(
                 Seat.EAST,
-                DiscardLegalAction(
-                    snapshot.actions[0].tile_id,
-                    DiscardDeclaration.RIICHI,
-                ),
+                RiichiLegalAction(),
                 expected_revision=snapshot.revision,
             )
 
@@ -1325,6 +1323,8 @@ _RIICHI_HANDS = {
     Seat.NORTH: INERT_HAND,
 }
 _RIICHI_DRAWS = ("5z", "6z", "5z", "6z", "5z", "6z", "5z", "6z")
+# 同じ聴牌手へ、複数の宣言牌候補を残すツモ牌を配る並び。
+_RIICHI_MULTI_DRAWS = ("2s", "5z", "6z", "5z", "6z", "5z", "6z", "5z")
 
 # SOUTHが3pをポンし、4枚目の3pを引いて加槓する局面。WESTは4pをツモった
 # 時点で3p/6p待ちの聴牌になり、加槓へ槍槓できる。
@@ -1500,16 +1500,28 @@ def _riichi_state(**kwargs) -> RoundState:
     )
 
 
-def _declare_riichi(state: RoundState, seat: Seat = Seat.EAST) -> DiscardLegalAction:
-    """`seat`がツモってから、立直を宣言できる打牌を1つ適用する。"""
-    state.draw(seat)
-    snapshot = state.legal_actions(seat)
-    action = next(
-        candidate
-        for candidate in snapshot.actions
-        if isinstance(candidate, DiscardLegalAction)
-        and candidate.declaration is DiscardDeclaration.RIICHI
+def _riichi_multi_declaration_state(**kwargs) -> RoundState:
+    """EASTの立直宣言牌候補が複数存在する局面を返す。"""
+    return _dealt_state(
+        hands=_RIICHI_HANDS,
+        draws=_RIICHI_MULTI_DRAWS,
+        with_dead_wall=True,
+        **kwargs,
     )
+
+
+def _select_riichi(state: RoundState, seat: Seat = Seat.EAST) -> None:
+    """`seat`が立直を選択し、宣言牌decisionへ進める。"""
+    snapshot = state.legal_actions(seat)
+    state.apply(seat, RiichiLegalAction(), expected_revision=snapshot.revision)
+
+
+def _declare_riichi(state: RoundState, seat: Seat = Seat.EAST) -> DiscardLegalAction:
+    """`seat`がツモり、立直を選択してから宣言牌を1つ打つ。"""
+    state.draw(seat)
+    _select_riichi(state, seat)
+    snapshot = state.legal_actions(seat)
+    action = snapshot.actions[0]
     state.apply(seat, action, expected_revision=snapshot.revision)
     return action
 
@@ -2058,6 +2070,135 @@ def _owned_tile_ids(state: RoundState) -> frozenset[int]:
     return frozenset(owned)
 
 
+class RoundStateRiichiSelectionTest(unittest.TestCase):
+    """立直の選択だけを適用した中間stateのcontractを固定する。"""
+
+    def _selected(self) -> RoundState:
+        state = _riichi_state()
+        state.draw(Seat.EAST)
+        _select_riichi(state)
+        return state
+
+    def test_selecting_riichi_moves_to_the_declaration_discard_phase(self) -> None:
+        state = _riichi_state()
+        state.draw(Seat.EAST)
+        before_revision = state.revision
+        before_hand = state.hand_tiles(Seat.EAST)
+        before_drawn = (state.drawn_tile_id, state.drawn_tile_source)
+        before_events = len(state.events)
+
+        _select_riichi(state)
+
+        self.assertIs(state.phase, RoundPhase.AWAITING_RIICHI_DISCARD)
+        self.assertIs(state.current_seat, Seat.EAST)
+        self.assertEqual(state.hand_tiles(Seat.EAST), before_hand)
+        self.assertEqual(
+            (state.drawn_tile_id, state.drawn_tile_source),
+            before_drawn,
+        )
+        self.assertEqual(state.revision, before_revision + 1)
+        self.assertEqual(len(state.events), before_events)
+
+    def test_selecting_riichi_produces_no_discard_and_no_declaration(self) -> None:
+        state = self._selected()
+
+        self.assertEqual(state.discards(Seat.EAST), ())
+        self.assertIsNone(state.pending_riichi_declaration)
+        self.assertEqual(state.riichi_finalizations, ())
+        self.assertEqual(state.riichi_contributions, ())
+        self.assertEqual(
+            dict(state.riichi_payment_deltas),
+            {seat: 0 for seat in Seat},
+        )
+        self.assertFalse(state.is_riichi_established(Seat.EAST))
+        self.assertFalse(state.is_ippatsu(Seat.EAST))
+        self.assertIs(state.riichi_status(Seat.EAST), RiichiStatus.NONE)
+
+    def test_selecting_riichi_emits_no_declaration_event(self) -> None:
+        """宣言牌が未確定の段階では、立直のprogress factを作らない。"""
+        state = _riichi_state()
+        state.draw(Seat.EAST)
+        before = len(state.events)
+
+        _select_riichi(state)
+
+        self.assertEqual(tuple(state.events)[before:], ())
+
+    def test_only_the_current_seat_has_actions_in_the_follow_up(self) -> None:
+        state = self._selected()
+
+        self.assertNotEqual(actions_of(state, Seat.EAST), ())
+        for seat in (Seat.SOUTH, Seat.WEST, Seat.NORTH):
+            with self.subTest(seat=seat):
+                self.assertEqual(actions_of(state, seat), ())
+
+    def test_the_follow_up_offers_only_declaration_discards(self) -> None:
+        state = _riichi_multi_declaration_state()
+        state.draw(Seat.EAST)
+        turn_actions = actions_of(state, Seat.EAST)
+        _select_riichi(state)
+
+        actions = actions_of(state, Seat.EAST)
+
+        self.assertNotEqual(actions, ())
+        self.assertTrue(
+            all(isinstance(action, DiscardLegalAction) for action in actions)
+        )
+        self.assertNotIn(RiichiLegalAction(), actions)
+        self.assertLess(len(actions), len(turn_actions))
+
+    def test_a_second_riichi_selection_is_rejected_atomically(self) -> None:
+        state = self._selected()
+        original = _capture(state)
+
+        with self.assertRaises(IllegalActionError):
+            state.apply(
+                Seat.EAST,
+                RiichiLegalAction(),
+                expected_revision=state.revision,
+            )
+
+        self.assertEqual(_capture(state), original)
+
+    def test_the_pre_selection_snapshot_is_stale_for_the_follow_up(self) -> None:
+        state = _riichi_state()
+        state.draw(Seat.EAST)
+        stale = state.legal_actions(Seat.EAST)
+        _select_riichi(state)
+        original = _capture(state)
+
+        with self.assertRaises(StaleActionError):
+            state.apply(
+                Seat.EAST,
+                state.legal_actions(Seat.EAST).actions[0],
+                expected_revision=stale.revision,
+            )
+
+        self.assertEqual(_capture(state), original)
+
+    def test_the_declaration_discard_connects_to_the_existing_riichi_path(
+        self,
+    ) -> None:
+        """宣言牌を打った時点で、既存のdeclaration / finalization pathへ入る。"""
+        state = self._selected()
+        snapshot = state.legal_actions(Seat.EAST)
+
+        state.apply(
+            Seat.EAST,
+            snapshot.actions[0],
+            expected_revision=snapshot.revision,
+        )
+
+        self.assertEqual(len(state.discards(Seat.EAST)), 1)
+        self.assertTrue(state.is_riichi_established(Seat.EAST))
+        self.assertTrue(state.is_ippatsu(Seat.EAST))
+        self.assertEqual(len(state.riichi_finalizations), 1)
+        self.assertEqual(
+            state.riichi_contributions,
+            (RiichiContribution(Seat.EAST, state.rules.riichi_stick_points),),
+        )
+
+
 class RoundStateRiichiTest(unittest.TestCase):
     def test_a_declaration_is_pending_until_the_reactions_resolve(self) -> None:
         state = _riichi_declaration_state()
@@ -2132,13 +2273,7 @@ class RoundStateRiichiTest(unittest.TestCase):
 
         state.draw(Seat.EAST)
 
-        self.assertFalse(
-            any(
-                isinstance(action, DiscardLegalAction)
-                and action.declaration is DiscardDeclaration.RIICHI
-                for action in actions_of(state, Seat.EAST)
-            )
-        )
+        self.assertNotIn(RiichiLegalAction(), actions_of(state, Seat.EAST))
 
     def test_exactly_the_minimum_points_allows_a_riichi_discard(self) -> None:
         points = starting_points()
@@ -2147,13 +2282,7 @@ class RoundStateRiichiTest(unittest.TestCase):
 
         state.draw(Seat.EAST)
 
-        self.assertTrue(
-            any(
-                isinstance(action, DiscardLegalAction)
-                and action.declaration is DiscardDeclaration.RIICHI
-                for action in actions_of(state, Seat.EAST)
-            )
-        )
+        self.assertIn(RiichiLegalAction(), actions_of(state, Seat.EAST))
 
     def test_a_ruleset_without_a_minimum_allows_riichi_from_any_score(self) -> None:
         rules = replace(RuleSet.default(), riichi_minimum_points=None)
@@ -2162,13 +2291,7 @@ class RoundStateRiichiTest(unittest.TestCase):
 
         state.draw(Seat.EAST)
 
-        self.assertTrue(
-            any(
-                isinstance(action, DiscardLegalAction)
-                and action.declaration is DiscardDeclaration.RIICHI
-                for action in actions_of(state, Seat.EAST)
-            )
-        )
+        self.assertIn(RiichiLegalAction(), actions_of(state, Seat.EAST))
 
     def test_an_established_riichi_seat_may_only_discard_the_drawn_tile(self) -> None:
         state = _riichi_state()
@@ -2320,10 +2443,11 @@ def _riichi_declaration_state(**kwargs) -> RoundState:
         for tile in state.hand_tiles(Seat.EAST)
         if tile.tile_type == _tile_type("7p")
     )
+    state.apply(Seat.EAST, RiichiLegalAction(), expected_revision=snapshot.revision)
     state.apply(
         Seat.EAST,
-        DiscardLegalAction(seven_pin.id, DiscardDeclaration.RIICHI),
-        expected_revision=snapshot.revision,
+        DiscardLegalAction(seven_pin.id),
+        expected_revision=state.revision,
     )
     return state
 
@@ -3317,7 +3441,7 @@ def _riichi_before_kakan_state(**kwargs) -> RoundState:
     resolve_with(state, {Seat.SOUTH: pon_action(state, Seat.SOUTH)})
     discard(state, Seat.SOUTH, "1z")
     state.draw(Seat.WEST)
-    discard(state, Seat.WEST, "9s", declaration=DiscardDeclaration.RIICHI)
+    discard(state, Seat.WEST, "9s", declares_riichi=True)
     play_quiet_turn(state)
     play_quiet_turn(state)
     state.draw(Seat.SOUTH)
@@ -3341,15 +3465,11 @@ def _riichi_before_ankan_state(**kwargs) -> RoundState:
     for _ in range(3):
         play_quiet_turn(state)
     state.draw(Seat.NORTH)
+    _select_riichi(state, Seat.NORTH)
     snapshot = state.legal_actions(Seat.NORTH)
     state.apply(
         Seat.NORTH,
-        next(
-            action
-            for action in snapshot.actions
-            if isinstance(action, DiscardLegalAction)
-            and action.declaration is DiscardDeclaration.RIICHI
-        ),
+        snapshot.actions[0],
         expected_revision=snapshot.revision,
     )
     if state.phase is RoundPhase.AWAITING_REACTIONS:

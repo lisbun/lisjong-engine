@@ -1,6 +1,7 @@
 import unittest
 
 from _round_fixtures import (
+    INERT_HAND,
     QUIET_DRAWS,
     QUIET_HANDS,
     build_wall,
@@ -19,16 +20,18 @@ from lisjong_engine.action_descriptor import (
     NineTerminalsActionDescriptor,
     PassActionDescriptor,
     PonActionDescriptor,
-    RiichiDiscardActionDescriptor,
+    RiichiActionDescriptor,
     RonActionDescriptor,
     TsumoActionDescriptor,
 )
-from lisjong_engine.action_projection import project_legal_actions
+from lisjong_engine.action_projection import (
+    ActionProjectionError,
+    project_legal_actions,
+)
 from lisjong_engine.legal_action import (
     AnkanLegalAction,
     ChiLegalAction,
     DaiminkanLegalAction,
-    DiscardDeclaration,
     DiscardLegalAction,
     KakanLegalAction,
     LegalActionSnapshot,
@@ -36,12 +39,14 @@ from lisjong_engine.legal_action import (
     PassLegalAction,
     PonLegalAction,
     ReactionOrigin,
+    RiichiLegalAction,
     RonLegalAction,
     TsumoLegalAction,
 )
 from lisjong_engine.match_state import MatchPhase, MatchState
 from lisjong_engine.observation_builder import build_seat_observation
 from lisjong_engine.round_phase import RoundPhase
+from lisjong_engine.round_state import StaleActionError
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import STANDARD_TILES
 from lisjong_engine.wall import Wall
@@ -117,6 +122,45 @@ def _standard_turn_state():
     return state
 
 
+_RIICHI_HANDS = {
+    Seat.EAST: (
+        "2m",
+        "3m",
+        "4m",
+        "5m",
+        "6m",
+        "7m",
+        "2p",
+        "3p",
+        "4p",
+        "5p",
+        "6p",
+        "2s",
+        "2s",
+    ),
+    Seat.SOUTH: INERT_HAND,
+    Seat.WEST: INERT_HAND,
+    Seat.NORTH: INERT_HAND,
+}
+# 宣言牌候補が複数残るツモ牌を配る並び。
+_RIICHI_MULTI_DRAWS = ("2s", "5z", "6z", "5z")
+
+
+def _riichi_turn_state():
+    """EASTが立直を選択でき、宣言牌候補も複数ある局面を返す。"""
+    state = new_state(
+        build_wall(
+            hands=_RIICHI_HANDS,
+            draws=_RIICHI_MULTI_DRAWS,
+            with_dead_wall=True,
+        ),
+        round_start_points=starting_points(),
+    )
+    state.deal()
+    state.draw(Seat.EAST)
+    return state
+
+
 def _reaction_state():
     state = new_state(
         build_wall(
@@ -142,7 +186,7 @@ class TurnActionProjectionTest(unittest.TestCase):
             state.revision,
             (
                 DiscardLegalAction(hand_ids[0]),
-                DiscardLegalAction(hand_ids[1], DiscardDeclaration.RIICHI),
+                RiichiLegalAction(),
                 AnkanLegalAction(hand_ids[:4]),
                 KakanLegalAction(hand_ids[4]),
                 TsumoLegalAction(),
@@ -156,7 +200,7 @@ class TurnActionProjectionTest(unittest.TestCase):
             {type(option) for option in projection.options},
             {
                 DiscardActionDescriptor,
-                RiichiDiscardActionDescriptor,
+                RiichiActionDescriptor,
                 AnkanActionDescriptor,
                 KakanActionDescriptor,
                 TsumoActionDescriptor,
@@ -261,6 +305,109 @@ class TurnActionProjectionTest(unittest.TestCase):
             tuple(first.resolve(option) for option in first.options),
             tuple(second.resolve(option) for option in second.options),
         )
+
+
+class RiichiProjectionTest(unittest.TestCase):
+    """立直の2段階decisionが、別々のprojectionとして成立することを固定する。"""
+
+    def test_the_turn_offers_exactly_one_riichi_choice(self) -> None:
+        state = _riichi_turn_state()
+
+        projection = project_legal_actions(state.legal_actions(Seat.EAST), state)
+        riichi_options = tuple(
+            option
+            for option in projection.options
+            if isinstance(option, RiichiActionDescriptor)
+        )
+
+        self.assertEqual(riichi_options, (RiichiActionDescriptor(),))
+        self.assertGreater(
+            len(
+                tuple(
+                    option
+                    for option in projection.options
+                    if isinstance(option, DiscardActionDescriptor)
+                )
+            ),
+            1,
+        )
+        self.assertEqual(
+            projection.resolve(RiichiActionDescriptor()),
+            RiichiLegalAction(),
+        )
+
+    def test_the_turn_never_offers_a_riichi_discard_descriptor(self) -> None:
+        state = _riichi_turn_state()
+
+        projection = project_legal_actions(state.legal_actions(Seat.EAST), state)
+
+        self.assertTrue(
+            all(
+                type(option).__name__ != "RiichiDiscardActionDescriptor"
+                for option in projection.options
+            )
+        )
+        self.assertTrue(
+            all(not hasattr(option, "tile_id") for option in projection.options)
+        )
+
+    def test_the_follow_up_builds_a_fresh_projection_of_plain_discards(self) -> None:
+        state = _riichi_turn_state()
+        turn = project_legal_actions(state.legal_actions(Seat.EAST), state)
+        state.apply(
+            Seat.EAST,
+            turn.resolve(RiichiActionDescriptor()),
+            expected_revision=turn.revision,
+        )
+
+        follow_up = project_legal_actions(state.legal_actions(Seat.EAST), state)
+
+        self.assertEqual(follow_up.revision, turn.revision + 1)
+        self.assertNotEqual(follow_up.options, ())
+        self.assertTrue(
+            all(
+                isinstance(option, DiscardActionDescriptor)
+                for option in follow_up.options
+            )
+        )
+        self.assertLess(len(follow_up.options), len(turn.options))
+
+    def test_the_pre_riichi_snapshot_cannot_be_projected_after_the_selection(
+        self,
+    ) -> None:
+        state = _riichi_turn_state()
+        stale_snapshot = state.legal_actions(Seat.EAST)
+        stale_projection = project_legal_actions(stale_snapshot, state)
+        state.apply(
+            Seat.EAST,
+            RiichiLegalAction(),
+            expected_revision=stale_snapshot.revision,
+        )
+
+        with self.assertRaises(ActionProjectionError):
+            project_legal_actions(stale_snapshot, state)
+        self.assertNotEqual(stale_projection.revision, state.revision)
+
+    def test_a_stale_projection_choice_is_rejected_by_the_round_state(self) -> None:
+        state = _riichi_turn_state()
+        stale = project_legal_actions(state.legal_actions(Seat.EAST), state)
+        stale_discard = next(
+            option
+            for option in stale.options
+            if isinstance(option, DiscardActionDescriptor)
+        )
+        state.apply(
+            Seat.EAST,
+            RiichiLegalAction(),
+            expected_revision=stale.revision,
+        )
+
+        with self.assertRaises(StaleActionError):
+            state.apply(
+                Seat.EAST,
+                stale.resolve(stale_discard),
+                expected_revision=stale.revision,
+            )
 
 
 class ReactionActionProjectionTest(unittest.TestCase):

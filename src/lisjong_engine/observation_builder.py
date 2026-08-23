@@ -17,8 +17,18 @@ from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.seat import Seat
 
+# current seatだけがdecisionを持つphase。立直選択後の宣言牌decisionも、
+# 通常turnと同じくcurrent seatだけのdecisionである。
+_CURRENT_SEAT_DECISION_PHASES = frozenset(
+    {
+        RoundPhase.AWAITING_DISCARD,
+        RoundPhase.AWAITING_RIICHI_DISCARD,
+    }
+)
+
 _DECISION_KINDS = {
     RoundPhase.AWAITING_DISCARD: ObservationDecisionKind.TURN,
+    RoundPhase.AWAITING_RIICHI_DISCARD: ObservationDecisionKind.RIICHI_DISCARD,
     RoundPhase.AWAITING_REACTIONS: ObservationDecisionKind.DISCARD_REACTION,
     RoundPhase.AWAITING_KAKAN_REACTIONS: ObservationDecisionKind.KAKAN_REACTION,
     RoundPhase.AWAITING_ANKAN_REACTIONS: ObservationDecisionKind.ANKAN_REACTION,
@@ -74,7 +84,7 @@ def _decision_kind_from_phase(phase: RoundPhase) -> ObservationDecisionKind:
 
 
 def _validate_deciding_seat(round_state: RoundState, viewer_seat: Seat) -> None:
-    if round_state.phase is RoundPhase.AWAITING_DISCARD:
+    if round_state.phase in _CURRENT_SEAT_DECISION_PHASES:
         if viewer_seat is not round_state.current_seat:
             raise RuntimeError("viewer is not the seat required to act")
         return

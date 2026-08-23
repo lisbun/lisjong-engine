@@ -11,6 +11,7 @@ class RoundPhaseTest(unittest.TestCase):
                 ("UNDEALT", "undealt"),
                 ("AWAITING_DRAW", "awaiting_draw"),
                 ("AWAITING_DISCARD", "awaiting_discard"),
+                ("AWAITING_RIICHI_DISCARD", "awaiting_riichi_discard"),
                 ("AWAITING_RINSHAN_DRAW", "awaiting_rinshan_draw"),
                 ("AWAITING_REACTIONS", "awaiting_reactions"),
                 ("AWAITING_KAKAN_REACTIONS", "awaiting_kakan_reactions"),
