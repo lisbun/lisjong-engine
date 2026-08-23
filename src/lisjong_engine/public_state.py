@@ -35,10 +35,19 @@ class PublicMeldType(Enum):
     KAKAN = "kakan"
 
 
+class PublicRiichiStatus(Enum):
+    """立直処理のplayer-safeなcurrent state。"""
+
+    NONE = "none"
+    PENDING = "pending"
+    ESTABLISHED = "established"
+
+
 @dataclass(frozen=True)
 class PublicDiscard:
     tile: PublicTile
     is_tsumogiri: bool
+    order: int
     is_riichi_declaration: bool
     called_by: Seat | None = None
 
@@ -47,6 +56,10 @@ class PublicDiscard:
             raise TypeError("tile must be a PublicTile")
         if type(self.is_tsumogiri) is not bool:
             raise TypeError("is_tsumogiri must be a bool")
+        if type(self.order) is not int:
+            raise TypeError("order must be an int")
+        if self.order < 0:
+            raise ValueError("order must be non-negative")
         if type(self.is_riichi_declaration) is not bool:
             raise TypeError("is_riichi_declaration must be a bool")
         if self.called_by is not None and not isinstance(self.called_by, Seat):
@@ -58,6 +71,7 @@ class PublicMeld:
     meld_type: PublicMeldType
     tiles: tuple[PublicTile, ...]
     from_seat: Seat | None
+    called_tile: PublicTile | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.meld_type, PublicMeldType):
@@ -78,8 +92,15 @@ class PublicMeld:
         if self.meld_type is PublicMeldType.ANKAN:
             if self.from_seat is not None:
                 raise ValueError("ankan must not have a source seat")
-        elif not isinstance(self.from_seat, Seat):
-            raise TypeError("open meld source must be a Seat")
+            if self.called_tile is not None:
+                raise ValueError("ankan must not have a called tile")
+        else:
+            if not isinstance(self.from_seat, Seat):
+                raise TypeError("open meld source must be a Seat")
+            if not isinstance(self.called_tile, PublicTile):
+                raise TypeError("open meld called_tile must be a PublicTile")
+            if self.called_tile not in tiles:
+                raise ValueError("called_tile must be present in meld tiles")
         object.__setattr__(self, "tiles", tiles)
 
 
@@ -123,12 +144,17 @@ class SeatScore:
 @dataclass(frozen=True)
 class SeatRiichiState:
     seat: Seat
-    is_established: bool
+    status: PublicRiichiStatus
 
     def __post_init__(self) -> None:
         _validate_seat(self.seat)
-        if type(self.is_established) is not bool:
-            raise TypeError("is_established must be a bool")
+        if not isinstance(self.status, PublicRiichiStatus):
+            raise TypeError("status must be a PublicRiichiStatus")
+
+    @property
+    def is_established(self) -> bool:
+        """Canonical `status`から導出する互換用predicate。"""
+        return self.status is PublicRiichiStatus.ESTABLISHED
 
 
 @dataclass(frozen=True)
@@ -174,6 +200,9 @@ def public_meld(meld: Meld) -> PublicMeld:
         meld_type=meld_type,
         tiles=tuple(public_tile(tile) for tile in meld.tiles),
         from_seat=from_seat,
+        called_tile=(
+            None if isinstance(meld, Ankan) else public_tile(meld.called_tile)
+        ),
     )
 
 

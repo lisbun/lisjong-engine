@@ -5,6 +5,7 @@ from lisjong_engine.public_state import (
     PublicDiscard,
     PublicMeld,
     PublicMeldType,
+    PublicRiichiStatus,
     PublicTile,
     SeatDiscards,
     SeatMelds,
@@ -43,20 +44,23 @@ class PublicTileTest(unittest.TestCase):
 class PublicDiscardTest(unittest.TestCase):
     def test_validates_every_field(self) -> None:
         tile = PublicTile(TileType(TileCategory.SOUZU, 3))
-        discard = PublicDiscard(tile, True, False, Seat.SOUTH)
+        discard = PublicDiscard(tile, True, 3, False, Seat.SOUTH)
 
         self.assertEqual(discard.tile, tile)
         self.assertTrue(discard.is_tsumogiri)
+        self.assertEqual(discard.order, 3)
         self.assertIs(discard.called_by, Seat.SOUTH)
         for kwargs in (
             {"tile": object()},
             {"is_tsumogiri": 1},
+            {"order": True},
             {"is_riichi_declaration": 0},
             {"called_by": "south"},
         ):
             values = {
                 "tile": tile,
                 "is_tsumogiri": False,
+                "order": 0,
                 "is_riichi_declaration": False,
                 "called_by": None,
             }
@@ -64,6 +68,8 @@ class PublicDiscardTest(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(TypeError):
                     PublicDiscard(**values)
+        with self.assertRaises(ValueError):
+            PublicDiscard(tile, False, -1, False)
 
 
 class PublicMeldTest(unittest.TestCase):
@@ -78,11 +84,16 @@ class PublicMeldTest(unittest.TestCase):
             (PublicMeldType.KAKAN, 4),
         ):
             with self.subTest(meld_type=meld_type):
-                meld = PublicMeld(meld_type, [self.tile] * count, Seat.WEST)
+                meld = PublicMeld(
+                    meld_type,
+                    [self.tile] * count,
+                    Seat.WEST,
+                    self.tile,
+                )
                 self.assertIsInstance(meld.tiles, tuple)
                 self.assertIs(meld.from_seat, Seat.WEST)
 
-        ankan = PublicMeld(PublicMeldType.ANKAN, [self.tile] * 4, None)
+        ankan = PublicMeld(PublicMeldType.ANKAN, [self.tile] * 4, None, None)
         self.assertIsNone(ankan.from_seat)
 
         one = PublicTile(TileType(TileCategory.MANZU, 1))
@@ -91,39 +102,84 @@ class PublicMeldTest(unittest.TestCase):
             PublicMeldType.CHI,
             [three, self.tile, one],
             Seat.WEST,
+            self.tile,
         )
         self.assertEqual(chi.tiles, (one, self.tile, three))
 
     def test_rejects_wrong_count_or_source(self) -> None:
         with self.assertRaises(ValueError):
-            PublicMeld(PublicMeldType.PON, [self.tile] * 4, Seat.SOUTH)
+            PublicMeld(
+                PublicMeldType.PON,
+                [self.tile] * 4,
+                Seat.SOUTH,
+                self.tile,
+            )
         with self.assertRaises(ValueError):
-            PublicMeld(PublicMeldType.ANKAN, [self.tile] * 4, Seat.SOUTH)
+            PublicMeld(
+                PublicMeldType.ANKAN,
+                [self.tile] * 4,
+                Seat.SOUTH,
+                None,
+            )
         with self.assertRaises(TypeError):
-            PublicMeld(PublicMeldType.CHI, [self.tile] * 3, None)
+            PublicMeld(PublicMeldType.CHI, [self.tile] * 3, None, self.tile)
         with self.assertRaises(TypeError):
-            PublicMeld("pon", [self.tile] * 3, Seat.SOUTH)
+            PublicMeld("pon", [self.tile] * 3, Seat.SOUTH, self.tile)
         with self.assertRaises(TypeError):
-            PublicMeld(PublicMeldType.PON, [object()] * 3, Seat.SOUTH)
+            PublicMeld(
+                PublicMeldType.PON,
+                [object()] * 3,
+                Seat.SOUTH,
+                self.tile,
+            )
+        with self.assertRaises(TypeError):
+            PublicMeld(PublicMeldType.PON, [self.tile] * 3, Seat.SOUTH, None)
+        with self.assertRaises(ValueError):
+            PublicMeld(
+                PublicMeldType.ANKAN,
+                [self.tile] * 4,
+                None,
+                self.tile,
+            )
+        with self.assertRaises(ValueError):
+            PublicMeld(
+                PublicMeldType.PON,
+                [self.tile] * 3,
+                Seat.SOUTH,
+                PublicTile(TileType(TileCategory.MANZU, 3)),
+            )
 
 
 class SeatPublicStateTest(unittest.TestCase):
     def test_wrappers_copy_normalize_and_validate(self) -> None:
         tile = PublicTile(TileType(TileCategory.PINZU, 3))
-        discard = PublicDiscard(tile, False, False)
-        meld = PublicMeld(PublicMeldType.PON, [tile] * 3, Seat.EAST)
+        discard = PublicDiscard(tile, False, 0, False)
+        meld = PublicMeld(PublicMeldType.PON, [tile] * 3, Seat.EAST, tile)
 
         self.assertEqual(SeatDiscards(Seat.SOUTH, [discard]).discards, (discard,))
         self.assertEqual(SeatMelds(Seat.SOUTH, [meld]).melds, (meld,))
         self.assertEqual(SeatScore(Seat.SOUTH, -100).points, -100)
-        self.assertTrue(SeatRiichiState(Seat.SOUTH, True).is_established)
+        state = SeatRiichiState(Seat.SOUTH, PublicRiichiStatus.ESTABLISHED)
+        self.assertIs(state.status, PublicRiichiStatus.ESTABLISHED)
+        self.assertTrue(state.is_established)
+        self.assertFalse(
+            SeatRiichiState(Seat.SOUTH, PublicRiichiStatus.PENDING).is_established
+        )
+        self.assertEqual(
+            {field.name for field in fields(SeatRiichiState)},
+            {"seat", "status"},
+        )
+        self.assertEqual(
+            {status.value for status in PublicRiichiStatus},
+            {"none", "pending", "established"},
+        )
 
         constructors = (
             lambda: SeatDiscards("south", ()),
             lambda: SeatDiscards(Seat.SOUTH, (object(),)),
             lambda: SeatMelds(Seat.SOUTH, (object(),)),
             lambda: SeatScore(Seat.SOUTH, True),
-            lambda: SeatRiichiState(Seat.SOUTH, 1),
+            lambda: SeatRiichiState(Seat.SOUTH, "established"),
         )
         for constructor in constructors:
             with self.subTest(constructor=constructor):

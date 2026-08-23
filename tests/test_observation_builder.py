@@ -2,7 +2,19 @@ import copy
 import unittest
 from dataclasses import fields, replace
 
-from _round_fixtures import quiet_state, tiles
+from _round_fixtures import (
+    INERT_HAND,
+    QUIET_HANDS,
+    action_of_type,
+    chi_action,
+    dealt_state,
+    declare_riichi,
+    pon_action,
+    quiet_state,
+    resolve_all_pass,
+    resolve_with,
+    tiles,
+)
 
 from lisjong_engine.discard import Discard
 from lisjong_engine.kan import PendingAnkan, PendingKakan
@@ -15,7 +27,7 @@ from lisjong_engine.observation_builder import (
     build_seat_observation,
 )
 from lisjong_engine.player_state import PlayerState
-from lisjong_engine.public_state import PublicMeldType
+from lisjong_engine.public_state import PublicMeldType, PublicRiichiStatus, public_tile
 from lisjong_engine.public_state import public_meld as _public_meld
 from lisjong_engine.reaction import ReactionType
 from lisjong_engine.riichi_event import (
@@ -23,6 +35,11 @@ from lisjong_engine.riichi_event import (
     finalize_riichi_declaration,
 )
 from lisjong_engine.round_allocation import create_round_random_provenance
+from lisjong_engine.round_event import (
+    RiichiDeclaredEvent,
+    RiichiFinalizedEvent,
+    TileDiscardedEvent,
+)
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import Tile
@@ -63,6 +80,42 @@ def _declaration(
         was_first_discard=True,
         had_prior_call=False,
     )
+
+
+def _call_fixture(call_type: str) -> tuple[MatchState, object]:
+    hands = {seat: tuple(hand) for seat, hand in QUIET_HANDS.items()}
+    if call_type == "pon":
+        south = list(hands[Seat.SOUTH])
+        south[9:11] = ("5z", "5z")
+        hands[Seat.SOUTH] = tuple(south)
+        draw_name = "5z"
+    elif call_type == "chi":
+        south = list(hands[Seat.SOUTH])
+        south[2] = "1m"
+        hands[Seat.SOUTH] = tuple(south)
+        draw_name = "3m"
+    else:
+        raise ValueError("unsupported call type")
+
+    round_state = dealt_state(
+        hands=hands,
+        draws=(draw_name, "6z"),
+        with_dead_wall=True,
+    )
+    drawn = round_state.draw(Seat.EAST)
+    snapshot = round_state.legal_actions(Seat.EAST)
+    round_state.apply(
+        Seat.EAST,
+        DiscardLegalAction(drawn.id),
+        expected_revision=snapshot.revision,
+    )
+    call_action = (
+        pon_action(round_state, Seat.SOUTH)
+        if call_type == "pon"
+        else chi_action(round_state, Seat.SOUTH)
+    )
+    resolve_with(round_state, {Seat.SOUTH: call_action})
+    return _attach(MatchState(seed=1), round_state), round_state
 
 
 class ObservationBuilderValidationTest(unittest.TestCase):
@@ -158,11 +211,29 @@ class ObservationBuilderValidationTest(unittest.TestCase):
                 observation = build_seat_observation(match, Seat.SOUTH)
 
                 self.assertIs(observation.decision_kind, expected)
+                self.assertIsNone(observation.drawn_tile)
                 with self.assertRaises(RuntimeError):
                     build_seat_observation(match, Seat.EAST)
 
 
 class ObservationBuilderProjectionTest(unittest.TestCase):
+    def test_projects_the_viewers_drawn_tile_with_red_semantics(self) -> None:
+        round_state = dealt_state(
+            hands=QUIET_HANDS,
+            draws=("5m",),
+            with_dead_wall=True,
+        )
+        drawn_tile = round_state.draw(Seat.EAST)
+        match = _attach(MatchState(seed=1), round_state)
+
+        observation = build_seat_observation(match, Seat.EAST)
+
+        self.assertEqual(observation.drawn_tile, public_tile(drawn_tile))
+        self.assertTrue(observation.drawn_tile.is_red)
+        self.assertIn(observation.drawn_tile, observation.hand_tiles)
+        self.assertFalse(hasattr(observation.drawn_tile, "id"))
+        self.assertFalse(hasattr(observation.drawn_tile, "copy_index"))
+
     def test_projects_only_the_viewers_hand_and_all_public_seat_state(self) -> None:
         match, round_state = _started_turn_match()
         observation = build_seat_observation(match, Seat.EAST)
@@ -216,13 +287,28 @@ class ObservationBuilderProjectionTest(unittest.TestCase):
             Seat.SOUTH,
             discards=(Discard(discarded_tile, True, Seat.WEST),),
         )
+        round_state._events = round_state.events.appended(
+            (TileDiscardedEvent(Seat.SOUTH, discarded_tile, True),)
+        )
 
         public_discard = (
             build_seat_observation(match, Seat.EAST).discards[1].discards[0]
         )
 
         self.assertTrue(public_discard.is_tsumogiri)
+        self.assertEqual(public_discard.order, 0)
         self.assertIs(public_discard.called_by, Seat.WEST)
+
+    def test_fails_closed_when_discard_history_and_river_disagree(self) -> None:
+        match, round_state = _turn_fixture()
+        discarded_tile = round_state.hand_tiles(Seat.SOUTH)[0]
+        round_state._players[Seat.SOUTH] = PlayerState(
+            Seat.SOUTH,
+            discards=(Discard(discarded_tile, False),),
+        )
+
+        with self.assertRaises(RuntimeError):
+            build_seat_observation(match, Seat.EAST)
 
     def test_projects_all_five_meld_types_with_publicly_sorted_tiles(self) -> None:
         one, two, three, four = tiles("3m", "3m", "3m", "3m")
@@ -251,7 +337,18 @@ class ObservationBuilderProjectionTest(unittest.TestCase):
             (1, 2, 3),
         )
         self.assertIsNone(projected[-1].from_seat)
+        self.assertIsNone(projected[-1].called_tile)
         self.assertTrue(all(meld.from_seat is not None for meld in projected[:-1]))
+        self.assertEqual(
+            tuple(meld.called_tile for meld in projected[:-1]),
+            tuple(public_tile(meld.called_tile) for meld in melds[:-1]),
+        )
+        self.assertEqual(projected[3].called_tile, public_tile(pon.called_tile))
+
+        red_one, red_two, red_three = tiles("5m", "5m", "5m")
+        red_pon = _public_meld(Pon(red_one, (red_two, red_three), Seat.WEST))
+        self.assertTrue(red_pon.called_tile.is_red)
+        self.assertFalse(hasattr(red_pon.called_tile, "id"))
         with self.assertRaises(TypeError):
             _public_meld(object())
 
@@ -268,6 +365,93 @@ class ObservationBuilderProjectionTest(unittest.TestCase):
         observation = build_seat_observation(match, Seat.EAST)
 
         self.assertTrue(all(not seat_melds.melds for seat_melds in observation.melds))
+
+    def test_chi_and_pon_follow_up_discards_have_no_drawn_tile(self) -> None:
+        for call_type in ("chi", "pon"):
+            with self.subTest(call_type=call_type):
+                match, _ = _call_fixture(call_type)
+                observation = build_seat_observation(match, Seat.SOUTH)
+                self.assertIs(observation.decision_kind, ObservationDecisionKind.TURN)
+                self.assertIsNone(observation.drawn_tile)
+
+    def test_discard_reaction_does_not_expose_the_discarders_drawn_tile(self) -> None:
+        hands = {seat: tuple(hand) for seat, hand in QUIET_HANDS.items()}
+        south = list(hands[Seat.SOUTH])
+        south[9:11] = ("5z", "5z")
+        hands[Seat.SOUTH] = tuple(south)
+        round_state = dealt_state(
+            hands=hands,
+            draws=("5z",),
+            with_dead_wall=True,
+        )
+        drawn = round_state.draw(Seat.EAST)
+        snapshot = round_state.legal_actions(Seat.EAST)
+        round_state.apply(
+            Seat.EAST,
+            DiscardLegalAction(drawn.id),
+            expected_revision=snapshot.revision,
+        )
+        match = _attach(MatchState(seed=1), round_state)
+
+        observation = build_seat_observation(match, Seat.SOUTH)
+
+        self.assertIs(
+            observation.decision_kind,
+            ObservationDecisionKind.DISCARD_REACTION,
+        )
+        self.assertIsNone(observation.drawn_tile)
+
+    def test_discard_order_is_round_global_and_survives_a_call(self) -> None:
+        match, round_state = _call_fixture("pon")
+        called = build_seat_observation(match, Seat.SOUTH).discards[0].discards[0]
+        self.assertEqual(called.order, 0)
+        self.assertIs(called.called_by, Seat.SOUTH)
+
+        action = action_of_type(round_state, Seat.SOUTH, DiscardLegalAction)
+        snapshot = round_state.legal_actions(Seat.SOUTH)
+        round_state.apply(
+            Seat.SOUTH,
+            action,
+            expected_revision=snapshot.revision,
+        )
+        if round_state.phase is RoundPhase.AWAITING_DRAW:
+            round_state.draw(round_state.current_seat)
+            viewer = round_state.current_seat
+        else:
+            viewer = round_state.reacting_seats[0]
+        observation = build_seat_observation(match, viewer)
+        projected = tuple(
+            discard
+            for seat_discards in observation.discards
+            for discard in seat_discards.discards
+        )
+
+        self.assertEqual(
+            {discard.order for discard in projected},
+            {0, 1},
+        )
+        self.assertEqual(observation.discards[0].discards[0].order, 0)
+        self.assertEqual(observation.discards[1].discards[0].order, 1)
+
+    def test_discard_order_is_deterministic_for_the_same_actions(self) -> None:
+        observations = []
+        for _ in range(2):
+            match, round_state = _call_fixture("pon")
+            action = action_of_type(round_state, Seat.SOUTH, DiscardLegalAction)
+            snapshot = round_state.legal_actions(Seat.SOUTH)
+            round_state.apply(
+                Seat.SOUTH,
+                action,
+                expected_revision=snapshot.revision,
+            )
+            if round_state.phase is RoundPhase.AWAITING_DRAW:
+                round_state.draw(round_state.current_seat)
+                viewer = round_state.current_seat
+            else:
+                viewer = round_state.reacting_seats[0]
+            observations.append(build_seat_observation(match, viewer).discards)
+
+        self.assertEqual(observations[0], observations[1])
 
     def test_exposes_only_revealed_dora_even_when_delayed_kan_dora_is_pending(
         self,
@@ -297,6 +481,7 @@ class ObservationBuilderRiichiTest(unittest.TestCase):
         declaration = _declaration(Discard(tile, False))
         round_state._players[Seat.EAST] = PlayerState(
             Seat.EAST,
+            round_state.hand_tiles(Seat.EAST),
             discards=(river_discard,),
             riichi_status=(
                 RiichiStatus.RIICHI
@@ -306,24 +491,36 @@ class ObservationBuilderRiichiTest(unittest.TestCase):
         )
         if reaction_type is None:
             round_state._pending_riichi_declaration = declaration
+            round_state._events = round_state.events.appended(
+                (
+                    TileDiscardedEvent(Seat.EAST, tile, False),
+                    RiichiDeclaredEvent(declaration),
+                )
+            )
         else:
-            round_state._riichi_finalizations = (
-                finalize_riichi_declaration(
-                    declaration,
-                    reaction_type=reaction_type,
-                    riichi_stick_points=round_state.rules.riichi_stick_points,
-                ),
+            finalization = finalize_riichi_declaration(
+                declaration,
+                reaction_type=reaction_type,
+                riichi_stick_points=round_state.rules.riichi_stick_points,
+            )
+            round_state._riichi_finalizations = (finalization,)
+            round_state._events = round_state.events.appended(
+                (
+                    TileDiscardedEvent(Seat.EAST, tile, False),
+                    RiichiDeclaredEvent(declaration),
+                    RiichiFinalizedEvent(finalization),
+                )
             )
         return match, round_state
 
-    def test_marks_only_an_established_riichi_declaration_tile(self) -> None:
-        for reaction_type, expected in (
-            (None, False),
-            (ReactionType.RON, False),
-            (ReactionType.PASS, True),
-            (ReactionType.CHI, True),
-            (ReactionType.PON, True),
-            (ReactionType.DAIMINKAN, True),
+    def test_marks_every_actual_riichi_declaration_discard(self) -> None:
+        for reaction_type in (
+            None,
+            ReactionType.RON,
+            ReactionType.PASS,
+            ReactionType.CHI,
+            ReactionType.PON,
+            ReactionType.DAIMINKAN,
         ):
             with self.subTest(reaction_type=reaction_type):
                 match, _ = self._install_declaration(
@@ -347,7 +544,110 @@ class ObservationBuilderRiichiTest(unittest.TestCase):
                     .discards[0]
                     .discards[0]
                 )
-                self.assertIs(discard.is_riichi_declaration, expected)
+                self.assertTrue(discard.is_riichi_declaration)
+
+    def test_projects_none_pending_and_established_from_actual_transitions(
+        self,
+    ) -> None:
+        hands = {seat: INERT_HAND for seat in Seat}
+        hands[Seat.EAST] = (
+            "2m",
+            "3m",
+            "4m",
+            "5m",
+            "6m",
+            "7m",
+            "2p",
+            "3p",
+            "4p",
+            "5p",
+            "6p",
+            "2s",
+            "2s",
+        )
+        south = list(INERT_HAND)
+        south[9:11] = ("5p", "5p")
+        hands[Seat.SOUTH] = tuple(south)
+        round_state = dealt_state(
+            hands=hands,
+            draws=("2s", "6z"),
+            with_dead_wall=True,
+        )
+        round_state.draw(Seat.EAST)
+        match = _attach(MatchState(seed=1), round_state)
+
+        initial = build_seat_observation(match, Seat.EAST)
+        self.assertIs(
+            initial.riichi_states[0].status,
+            PublicRiichiStatus.NONE,
+        )
+        drawn_before = initial.drawn_tile
+        events_before = tuple(round_state.events)
+
+        declare_riichi(round_state, Seat.EAST)
+
+        selected = build_seat_observation(match, Seat.EAST)
+        self.assertIs(
+            selected.decision_kind,
+            ObservationDecisionKind.RIICHI_DISCARD,
+        )
+        self.assertIs(
+            selected.riichi_states[0].status,
+            PublicRiichiStatus.PENDING,
+        )
+        self.assertEqual(selected.drawn_tile, drawn_before)
+        self.assertEqual(selected.discards[0].discards, ())
+        self.assertIsNone(round_state.pending_riichi_declaration)
+        self.assertEqual(tuple(round_state.events), events_before)
+
+        snapshot = round_state.legal_actions(Seat.EAST)
+        declaration_action = next(
+            action
+            for action in snapshot.actions
+            if isinstance(action, DiscardLegalAction)
+            and next(
+                tile
+                for tile in round_state.hand_tiles(Seat.EAST)
+                if tile.id == action.tile_id
+            ).tile_type.rank
+            == 5
+        )
+        round_state.apply(
+            Seat.EAST,
+            declaration_action,
+            expected_revision=snapshot.revision,
+        )
+
+        reacting = build_seat_observation(match, Seat.SOUTH)
+        self.assertIs(round_state.phase, RoundPhase.AWAITING_REACTIONS)
+        self.assertIs(
+            reacting.riichi_states[0].status,
+            PublicRiichiStatus.PENDING,
+        )
+        self.assertIsNone(reacting.drawn_tile)
+        self.assertTrue(reacting.discards[0].discards[0].is_riichi_declaration)
+        self.assertIsNotNone(round_state.pending_riichi_declaration)
+
+        resolve_all_pass(round_state)
+        round_state.draw(Seat.SOUTH)
+        established = build_seat_observation(match, Seat.SOUTH)
+
+        self.assertIs(
+            established.riichi_states[0].status,
+            PublicRiichiStatus.ESTABLISHED,
+        )
+        self.assertTrue(established.discards[0].discards[0].is_riichi_declaration)
+        self.assertTrue(round_state.is_riichi_established(Seat.EAST))
+
+    def test_failed_riichi_is_not_projected_as_established(self) -> None:
+        match, _ = self._install_declaration(reaction_type=ReactionType.RON)
+
+        observation = build_seat_observation(match, Seat.EAST)
+
+        self.assertIs(
+            observation.riichi_states[0].status,
+            PublicRiichiStatus.NONE,
+        )
 
     def test_visible_scores_and_sticks_use_established_contributions(self) -> None:
         match, round_state = self._install_declaration(reaction_type=ReactionType.PASS)
@@ -421,14 +721,21 @@ class ObservationBuilderHiddenStateEquivalenceTest(unittest.TestCase):
     def test_physical_copies_do_not_affect_publicly_equal_hand(self) -> None:
         match_a, _ = _started_turn_match(seed=13)
         match_b, round_b = _started_turn_match(seed=13)
+        original_hand = round_b.hand_tiles(Seat.EAST)
         public_equivalent_hand = tuple(
             Tile(tile.tile_type, (tile.copy_index + 1) % 4, tile.is_red)
-            for tile in round_b.hand_tiles(Seat.EAST)
+            for tile in original_hand
+        )
+        drawn_index = next(
+            index
+            for index, tile in enumerate(original_hand)
+            if tile.id == round_b.drawn_tile_id
         )
         round_b._players[Seat.EAST] = PlayerState(
             Seat.EAST,
             public_equivalent_hand,
         )
+        round_b._drawn_tile_id = public_equivalent_hand[drawn_index].id
 
         self.assertEqual(
             build_seat_observation(match_a, Seat.EAST),

@@ -3,6 +3,8 @@ from dataclasses import FrozenInstanceError, fields, replace
 
 from lisjong_engine.observation import ObservationDecisionKind, SeatObservation
 from lisjong_engine.public_state import (
+    PublicDiscard,
+    PublicRiichiStatus,
     PublicTile,
     SeatDiscards,
     SeatMelds,
@@ -23,6 +25,7 @@ def _observation(**overrides) -> SeatObservation:
         "honba": 0,
         "riichi_sticks": 0,
         "hand_tiles": [tile],
+        "drawn_tile": tile,
         "discards": [SeatDiscards(seat, ()) for seat in Seat],
         "melds": [SeatMelds(seat, ()) for seat in Seat],
         "dora_indicators": [tile],
@@ -30,7 +33,9 @@ def _observation(**overrides) -> SeatObservation:
         "scores": [SeatScore(seat, 25_000) for seat in Seat],
         "dealer_seat": Seat.EAST,
         "prevailing_wind": Wind.EAST,
-        "riichi_states": [SeatRiichiState(seat, False) for seat in Seat],
+        "riichi_states": [
+            SeatRiichiState(seat, PublicRiichiStatus.NONE) for seat in Seat
+        ],
     }
     values.update(overrides)
     return SeatObservation(**values)
@@ -99,6 +104,48 @@ class SeatObservationTest(unittest.TestCase):
             with self.subTest(field_name=field_name, value=value):
                 with self.assertRaises(error):
                     replace(valid, **{field_name: value})
+
+    def test_drawn_tile_must_be_public_in_hand_and_hidden_from_reactions(self) -> None:
+        valid = _observation()
+        with self.assertRaises(TypeError):
+            replace(valid, drawn_tile=object())
+        with self.assertRaises(ValueError):
+            replace(
+                valid,
+                drawn_tile=PublicTile(TileType(TileCategory.PINZU, 1)),
+            )
+        with self.assertRaises(ValueError):
+            replace(
+                valid,
+                decision_kind=ObservationDecisionKind.DISCARD_REACTION,
+            )
+
+    def test_discard_orders_are_round_global_unique_and_contiguous(self) -> None:
+        tile = PublicTile(TileType(TileCategory.MANZU, 1))
+        valid = _observation(
+            discards=[
+                SeatDiscards(Seat.EAST, (PublicDiscard(tile, False, 0, False),)),
+                SeatDiscards(Seat.SOUTH, (PublicDiscard(tile, False, 1, False),)),
+                SeatDiscards(Seat.WEST, ()),
+                SeatDiscards(Seat.NORTH, ()),
+            ]
+        )
+        with self.assertRaises(ValueError):
+            replace(
+                valid,
+                discards=[
+                    SeatDiscards(
+                        Seat.EAST,
+                        (PublicDiscard(tile, False, 0, False),),
+                    ),
+                    SeatDiscards(
+                        Seat.SOUTH,
+                        (PublicDiscard(tile, False, 0, False),),
+                    ),
+                    SeatDiscards(Seat.WEST, ()),
+                    SeatDiscards(Seat.NORTH, ()),
+                ],
+            )
 
     def test_has_no_action_or_internal_state_fields(self) -> None:
         field_names = {field.name for field in fields(SeatObservation)}
