@@ -437,6 +437,92 @@ Human Play requirementから導いた最小差分であり、generic `GameEvent`
 formatを新設しない。将来複数consumerが必要とする場合も、この最小boundaryを
 起点に再検討する。
 
+### Ordered player-safe round evidence
+
+HandBelief等の将来consumerが「そのviewerに何が合法的に観測可能だったか」を
+順序付きで受け取れるよう、engine内部の完全state / event historyからviewerごとの
+ordered player-safe evidenceをpureに射影する（Issue #42）。
+
+```text
+complete engine state / internal events
+    -> engine-owned pure player-safe projection
+    -> ordered player-safe round evidence
+```
+
+`SeatObservation`はcurrent decision snapshot、`RoundProgressFact`は前回decisionからの
+差分delivery、`round_evidence.py`は局内の順序付きevidence historyであり、責務が異なる。
+`RoundEvent` / `RoundEventSnapshot`は引き続きengine内部のomniscient recordであり、
+consumer-facing contractへ昇格しない。`round_evidence.py`が、そこからwhitelistした
+evidenceだけを構築する。
+
+**player-safeはpublic-onlyと同義ではない。**
+
+```text
+player-safe evidence
+├─ globally public evidence / context
+└─ viewer-private legitimate observation（viewer自身のツモ牌）
+```
+
+`DrawEvidence.tile`はviewer自身のツモのときだけ値を持ち、他家のツモでは常に`None`に
+なる。ツモが起きたこと自体と`DrawSource`（live wall / 嶺上）はpublicである。
+
+**structural response epochをruntime reaction activationから導出しない。**
+current engineは打牌後に`has_possible_reaction()`で他家のhidden handを見てから
+`AWAITING_REACTIONS`へ入るか決め、暗槓も`kokushi_ankan_chankan_enabled`と実際の
+国士無双候補の有無でreaction windowを開くかどうかが変わる。したがって
+**reaction windowが開いたというruntime factそのものがhidden capabilityを漏らし得る**。
+
+player-safe evidenceのresponse epochはこの分岐を入力にせず、次だけから構成する。
+
+```text
+public triggering action + RuleSet + seat topology
+    -> ResponseEpochOpenedEvidence / responder topology
+```
+
+```text
+打牌   publicに打牌が起きた時点で必ずstructural epochを開く
+加槓   public kakan declarationで必ずstructural chankan epochを開く
+暗槓   kokushi_ankan_chankan_enabledだけで開閉を決める
+```
+
+responder topologyはいずれもsource seat以外の3席であり、`reaction_seat_order()`という
+seat topologyだけで決まる。「その席が合法な反応を持っていた」ことは意味しない。
+
+epochのoutcome（`ResponseOutcome`）は、実際にpublicへ現れた進行（鳴き成立、和了、
+次の進行）だけから決める。epochの解決がまだpublicに現れていない間は
+`ResponseEpochClosedEvidence`を出さず、その解決を前提とする槓ドラ公開・立直成立も
+fail closedで保留する。これにより、hidden candidateの有無でruntimeのreaction window
+が開いた場合と開かなかった場合とで、同じ公開進行に対して同じevidenceになる。
+
+```text
+kan宣言 -> structural response epoch -> response / no public response
+    -> kan confirmation -> 嶺上ツモ -> 槓ドラ公開
+riichi宣言牌の打牌 -> RiichiDeclaredEvidence -> structural response epoch
+    -> response / no public response -> RiichiEstablishedEvidence / RiichiFailedEvidence
+```
+
+打牌と鳴きのcalled-by関係は、過去のevidenceを書き換えず
+`MeldCalledEvidence.called_discard_order`で保持する。`DiscardEvidence.order`は
+`PublicDiscard.order`と同じ、局全体で0始まりのchronological identityである。
+`is_riichi_declaration`も同じく、成立可否ではなく宣言牌として打たれたhistorical factを表す。
+
+**hidden情報はfail closedで落とす。** 他家concealed hand、他家のツモ牌、live / dead wallの
+tile truth、`ron_capable_seats` / `ron_passed_seats`、pon / chi capable等のactual per-player
+legal opportunity、hidden-dependent pass、フリテン、ron legality、
+`MissedRonRecordedEvent`、`ReactionResolution`自体、physical tile identityはevidenceへ
+含めない。`TilesDealtEvent`（全席の配牌）も対象外である。九種九牌のように
+eligibilityがhidden handへ依存するterminalでも、実際に宣言されて終局したことと
+その理由だけをpublicとして扱う。
+
+consumerがomniscientな`RoundState.events`へ直接触れずに済むよう、engine側の唯一の
+入口を`round_evidence_builder.py`の`build_round_evidence(round_state, viewer_seat)`とする。
+`build_seat_observation()`と違いdecision phaseを要求しない。evidenceは意思決定snapshot
+ではなく、局のどの時点でも参照できる観測履歴だからである。
+
+HandBelief / ML / dataset feature semanticsはengineへ持ち込まない。どのevidenceをどう
+HandBelief featureへ解釈するかは`lisjong`の責務であり、この境界は
+`lisjong` / `lisjong-arena`への依存を導入しない。
+
 ### 合法手導出と反応境界
 
 合法手の導出は状態mutationから分離したpure moduleに置き、`RoundState` 側は
