@@ -523,6 +523,44 @@ HandBelief / ML / dataset feature semanticsはengineへ持ち込まない。ど�
 HandBelief featureへ解釈するかは`lisjong`の責務であり、この境界は
 `lisjong` / `lisjong-arena`への依存を導入しない。
 
+### Round completion境界でのseat-relative evidence delivery
+
+`build_round_evidence()`は局のどの時点でも呼べるが、consumerがそれを呼べるのは
+active `RoundState`を保持できている間だけである。局を`FINISHED`にした最後の
+transactionが`RoundProgressFact`を生じない場合（terminal ron等）、`on_delivery`は
+呼ばれないまま次のloopで`settle_active_round()`がactive roundをclearし、
+`ResponseEpochClosedEvidence` / `RoundEndedEvidence`を含むcomplete evidenceを
+取得する機会が失われる。この欠落だけを埋めるため、`run_hanchan()`へ
+optionalな`on_round_evidence_complete`を追加する（Issue #46）。
+
+```text
+final round transaction commit
+    -> RoundPhase.FINISHED
+    -> build_round_evidence(round_state, viewer_seat) x tuple(Seat)
+    -> RoundEvidenceCompletion を局ごとに1回だけdelivery
+    -> callback return
+    -> MatchState.settle_active_round()
+    -> 次局 / match completion
+```
+
+**既存projectorがsemantic authorityである。** `round_evidence_completion.py`は新しい
+event interpretationをdriverへ複製せず、既存`build_round_evidence()`の結果を
+viewer identity付きで束ねるだけである。`RoundEvidence` / `RoundProgressFact` /
+`RoundCompletionFact`のsemanticsも、既存`on_delivery`のobservable behaviorも変更しない。
+両callbackを併用した場合、evidenceは同じ局のround completion factより前に届く。
+
+**bundleはsingle-player safeではない。** `SeatRoundEvidence`は`viewer_seat`に対してだけ
+player-safeであり、`RoundEvidenceCompletion`はそれを`tuple(Seat)`順に束ねたobjective
+recordである。4席分を合わせれば他家のツモ牌というviewer-private観測を含むため、
+consumerは常に対象viewerの`SeatRoundEvidence`だけを取り出して使う。round identityは
+`MatchState.position`由来のplayer-safeな位置情報（場風 / 局数 / 親 / 本場）だけを持ち、
+`round_ordinal`やseed等のrandom provenanceを公開しない。
+
+**fail-fast semanticsは`on_delivery`と同じである。** callbackはsynchronousであり、
+例外はそのまま呼び出し元へ伝播する。retry・silent skipはせず、callbackがreturnするまで
+精算も次局開始も行わないため、失敗時は精算前の状態で停止する。generic transaction
+observer、event bus、raw `RoundState`を渡すcallbackは導入しない。
+
 ### 合法手導出と反応境界
 
 合法手の導出は状態mutationから分離したpure moduleに置き、`RoundState` 側は

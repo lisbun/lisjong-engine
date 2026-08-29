@@ -15,6 +15,10 @@ from lisjong_engine.round_completion import (
     project_match_completion,
     project_round_completion,
 )
+from lisjong_engine.round_evidence_completion import (
+    RoundEvidenceCompletion,
+    build_round_evidence_completion,
+)
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_progress import RoundProgressFact, project_round_progress
 from lisjong_engine.round_state import RoundState
@@ -33,6 +37,11 @@ SeatSelectors: TypeAlias = Mapping[Seat, ActionSelector]
 # 生のinternal object（`RoundEvent`、`CompletedRound`等）を含まない。
 DeliveryItem: TypeAlias = RoundProgressFact | RoundCompletionFact | MatchCompletionFact
 DeliveryCallback: TypeAlias = Callable[[tuple[DeliveryItem, ...]], None]
+
+# 局が`FINISHED`へ確定した直後、まだ精算されていない局ごとに1回だけ呼ばれる
+# delivery境界。`on_delivery`のtransaction batchとは別contractであり、
+# viewerごとのseat-relative evidenceを1つのimmutable valueとして渡す。
+RoundEvidenceCallback: TypeAlias = Callable[[RoundEvidenceCompletion], None]
 
 _SEATS = tuple(Seat)
 # current seatだけが選ぶdecision phase。立直選択後の宣言牌decisionも、
@@ -68,6 +77,7 @@ def run_hanchan(
     selectors: SeatSelectors,
     *,
     on_delivery: DeliveryCallback | None = None,
+    on_round_evidence_complete: RoundEvidenceCallback | None = None,
 ) -> CompletedMatch:
     """現在のvalidなMatchStateから再開し、CompletedMatchまで進める。
 
@@ -80,7 +90,15 @@ def run_hanchan(
     呼び出し元へ伝播し、既に成功したengine transactionをrollbackしない。
     自動retry・自動replayは行わない。
 
-    `on_delivery`を指定しない場合、既存の`run_hanchan()`のselector呼出
+    `on_round_evidence_complete`を指定した場合、局を`FINISHED`へ確定させた
+    最後の成功transactionの後、かつ`settle_active_round()`でactive
+    `RoundState`が失われる前に、その局の`RoundEvidenceCompletion`を局ごとに
+    ちょうど1回だけ同期的に渡す。値はviewerごとの既存
+    `build_round_evidence()`射影だけで構成され、`RoundState`等のinternal
+    objectを含まない。callbackが例外を送出した場合はfail-fastでそのまま
+    伝播し、精算も次局開始も行わない（retry・silent skipはしない）。
+
+    どちらのcallbackも指定しない場合、既存の`run_hanchan()`のselector呼出
     順序・決定的進行・戻り値は変化しない。
     """
     if not isinstance(match_state, MatchState):
@@ -88,6 +106,10 @@ def run_hanchan(
     selectors_by_seat = _validate_selectors(selectors)
     if on_delivery is not None and not callable(on_delivery):
         raise TypeError("on_delivery must be callable or None")
+    if on_round_evidence_complete is not None and not callable(
+        on_round_evidence_complete
+    ):
+        raise TypeError("on_round_evidence_complete must be callable or None")
 
     event_cursor = (
         len(match_state.active_round.events)
@@ -110,6 +132,9 @@ def run_hanchan(
             if round_state is None:
                 raise DriverStateError("a round in progress requires an active round")
             if round_state.phase is RoundPhase.FINISHED:
+                # 精算前にだけ成立するevidence境界を先に渡し、callbackが
+                # returnしてから精算・次局へ進む。
+                _deliver_round_evidence(match_state, on_round_evidence_complete)
                 _settle_round(match_state, on_delivery)
                 event_cursor = 0
                 continue
@@ -203,6 +228,21 @@ def _deliver_new_progress(
     if facts:
         on_delivery(facts)
     return len(events)
+
+
+def _deliver_round_evidence(
+    match_state: MatchState,
+    on_round_evidence_complete: RoundEvidenceCallback | None,
+) -> None:
+    """終局済みでまだ精算されていないactive roundのevidenceをdeliveryする。
+
+    `settle_active_round()`より前にだけ呼べる。callbackがreturnするまで
+    呼び出し元は精算も次局開始も行わないため、callbackが例外を送出した
+    場合は精算前の状態で停止する。
+    """
+    if on_round_evidence_complete is None:
+        return
+    on_round_evidence_complete(build_round_evidence_completion(match_state))
 
 
 def _settle_round(
