@@ -111,9 +111,16 @@ Issueまたはユーザーの明示的な指示が本書と異なる場合は、
 ```text
 python -m ruff format --check .
 python -m ruff check .
-python -m unittest discover -s tests -v
 ```
 
+- source code・test codeを変更した場合は、変更したbehaviorと直接のregression boundaryをcoverする
+  focused testを実装中・Pull Request前に実行する。必要なtestを追加・更新し、対象testがpassすることを確認する
+- `python -m unittest discover -s tests -v` によるfull test suiteはGitHub Actionsをpre-mergeの正本とする。
+  CIがfull suiteを実行するrepositoryでは、同じfull suiteをローカルで毎回重複実行することを標準要件としない
+- ローカルfull suiteは、CI failureの再現・調査、shared test infrastructureやcross-cutting behaviorの広い変更、
+  CIを利用できない状況、Issueまたはユーザーの明示要求など、具体的な理由がある場合に実行する
+- review修正後は変更箇所に応じたfocused testを再実行し、full regressionは原則としてCIへ任せる
+- merge前にGitHub Actionsのfull suiteがpassしていることを確認する
 - 文書だけの変更では最低限`git diff --check`を実行し、source code・test codeの変更が
   含まれないことを確認する。Markdown lint等が標準化されている場合はそれも実行する
 - 外部serviceを使うtestでは本物のtokenや個人データを使用しない
