@@ -39,6 +39,7 @@ from lisjong_engine.round_state import (
     RoundState,
     StaleActionError,
 )
+from lisjong_engine.rule_presets import MAHJONG_SOUL_RULES, PROJECT_STANDARD_RULES
 from lisjong_engine.rules import RonResolutionPolicy, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.win_context import RiichiStatus, WinMethod, WinOrigin
@@ -523,6 +524,34 @@ class RoundRonFinalizationTest(unittest.TestCase):
         result = state.finalize_pending_win(expected_revision=state.revision)
 
         self.assertEqual(tuple(winner.seat for winner in result.winners), awarded)
+
+    def test_triple_ron_abortive_draw_follows_the_injected_preset(self) -> None:
+        """同じ3人ロンの結末が、注入したpresetの設定だけで分かれる。
+
+        雀魂presetは三家和を途中流局にせず通常のwin finalizationへ進み、
+        project標準presetは`AbortiveDrawReason.TRIPLE_RON`で流局する。
+        """
+        mahjong_soul = _ron_state(rules=MAHJONG_SOUL_RULES)
+        awarded = _resolve_ron(mahjong_soul, (Seat.SOUTH, Seat.WEST, Seat.NORTH))
+        project_standard = _ron_state(rules=PROJECT_STANDARD_RULES)
+        _resolve_ron(project_standard, (Seat.SOUTH, Seat.WEST, Seat.NORTH))
+
+        mahjong_soul_result = mahjong_soul.finalize_pending_win(
+            expected_revision=mahjong_soul.revision,
+        )
+        project_standard_result = project_standard.finalize_pending_win(
+            expected_revision=project_standard.revision,
+        )
+
+        self.assertIsInstance(mahjong_soul_result, WinResult)
+        self.assertEqual(
+            tuple(winner.seat for winner in mahjong_soul_result.winners),
+            awarded,
+        )
+        self.assertEqual(
+            project_standard_result,
+            AbortiveDrawResult(AbortiveDrawReason.TRIPLE_RON),
+        )
 
     def test_houtei_ron_preserves_last_tile_fact(self) -> None:
         state = dealt_state(

@@ -1,9 +1,13 @@
-# RuleSet と標準ルール
+# RuleSet と公式ルールpreset
 
 ## 1. 本書の目的
 
 本書は `lisjong-engine` の麻雀ルール設定契約（`RuleSet`）と、
-`RuleSet.default()` が表現する標準ルールセット `project-standard-v1` の正本である。
+first-partyに提供する具体的なルールpresetの正本である。
+
+`RuleSet.default()` は標準ルールセット `project-standard-v1` を表し、
+`rule_presets.py` は project-standard / Tenhou / Mahjong Soul / M League の
+具体的な `RuleSet` 値を提供する。
 
 ルール仕様そのものの由来は `python-study` の `docs/mahjong-rules.md` にあるが、
 本書はそれを丸ごと引き継いだものではなく、現在の `lisjong-engine` の
@@ -59,6 +63,7 @@ deterministicな再現性の補助情報としてのみ使用する。
 src/lisjong_engine/
     yaku.py             # Yaku identifier（役の名前だけ）
     rules.py            # RuleSet と policy enum
+    rule_presets.py     # first-party concrete RuleSet preset
     yaku_evaluation.py  # 役の成立判定と翻・役満倍率
     fu.py               # 符の内訳と最終符
     dora.py             # 表示牌snapshotからのドラ計数
@@ -66,6 +71,10 @@ src/lisjong_engine/
     score.py            # 支払点
     winning_score.py    # 得点候補の列挙と最高得点候補の選択
 ```
+
+`rules.py` は「どのルール設定を表現できるか」という型・policyの正本、
+`rule_presets.py` は「first-partyに提供する具体的な設定値の組み合わせ」の正本である。
+mechanicsはどちらのpresetを使ったかを知らず、渡された `RuleSet` のfieldだけを見る。
 
 `yaku.py` は役の **識別子** だけを定義し、翻数、日本語名、成立条件、
 役判定logicを持たない。役の評価は `yaku_evaluation.py` が担当する。
@@ -85,23 +94,37 @@ RuleSet -X-> yaku evaluation
 直接importする。
 
 ```python
+from lisjong_engine.rule_presets import TENHOU_RULES
 from lisjong_engine.rules import RuleSet
 from lisjong_engine.yaku import Yaku
 ```
 
-## 4. RuleSet.default()
+## 4. RuleSet.default() と first-party preset
 
 `RuleSet.default()` は標準ルールセット `project-standard-v1`（version 1）を返す。
-本engineで正式に提供するpresetはこれ1つだけである。
-
-`default()` は呼び出しごとに等価な値を返すが、同一instanceであることは契約しない。
+`rule_presets.py` の `PROJECT_STANDARD_RULES` はこのcontractをそのまま公開する。
 
 ```python
+PROJECT_STANDARD_RULES == RuleSet.default()  # 保証する
 RuleSet.default() == RuleSet.default()  # 保証する
 RuleSet.default() is RuleSet.default()  # 保証しない
 ```
 
-設定を変えたルールセットは `dataclasses.replace()` で作る。
+first-partyに提供するconcrete presetは次の4つである。
+
+| constant | `name` | モデル化対象 |
+| --- | --- | --- |
+| `PROJECT_STANDARD_RULES` | `project-standard-v1` | project標準 |
+| `TENHOU_RULES` | `tenhou-4p-east-south-red-v1` | 天鳳 四人打ち東南戦・喰いタンあり・赤あり段位戦 |
+| `MAHJONG_SOUL_RULES` | `mahjong-soul-4p-east-south-red-v1` | 雀魂 四人東南喰赤段位戦 |
+| `M_LEAGUE_RULES` | `m-league-4p-east-south-v1` | Mリーグ 四人東南戦（project上の意図的差分を含む） |
+
+external 3 presetは `RuleSet.default()` から `dataclasses.replace()` で派生させず、
+すべてのfieldを明示した独立完全定義とする。project-standardの将来変更が
+external presetへ暗黙伝播しないようにするためである。
+
+一方、callerが一時的・実験的な設定を作る用途では `dataclasses.replace()` を使ってよい。
+これはcanonical external preset definitionとは別の用途である。
 
 ```python
 from dataclasses import replace
@@ -110,10 +133,13 @@ rules = replace(RuleSet.default(), return_points=25_000)
 ```
 
 `RuleSet` はすべてのfieldを明示的に指定して構築する（field defaultを持たない）。
-将来ルールセットを追加する場合も、既存presetからの派生ではなく独立した完全定義とし、
-標準ルールの変更が他のルールセットへ暗黙に伝播しないようにする。
+将来first-party presetを追加する場合も、既存presetからの派生ではなく独立した完全定義とし、
+既存ルールの変更が他のpresetへ暗黙に伝播しないようにする。
 
-### 主要値
+外部サービスのルールが将来変わる場合、既存presetの意味を黙って変更せず、
+必要に応じて `name` / `version` を更新した新しいpresetとして扱う。
+
+### project-standard の主要値
 
 | 分類 | field | 値 |
 | --- | --- | --- |
@@ -186,6 +212,8 @@ propertyとして提供する。
 
 例えば「25,000点返し・一位必要点数30,000」のように、両者が異なるルールは実在する。
 `RuleSet` はこの組み合わせを表現できる。
+`MAHJONG_SOUL_RULES` は `return_points=25_000`、
+`first_place_target_points=30_000` を持つfirst-partyの実例である。
 
 ### bankruptcy_bonus_points と bankrupt_player_penalty_points
 
@@ -487,22 +515,32 @@ winning shape exists != legal scored win
 
 ## 11. 外部サービスのルール
 
-天鳳、雀魂、M.LEAGUE、RiichiLab等の外部サービス固有ルールは、
-本engineのpresetとして固定していない。`RuleSet.default()` が唯一の公式presetである。
+Issue #44 で、旧 `python-study` に残っていたexternal preset data / provenance /
+regression knowledgeをfirst-party `RuleSet` presetへ移管した。
 
-理由は次のとおり。
+現在first-partyに固定しているexternal presetは次の3つである。
 
-- preset数だけ検証の組み合わせが増える
-- 未確認のルールを推測で埋めない方針を優先する
+- `TENHOU_RULES`: 天鳳 四人打ち東南戦・喰いタンあり・赤あり段位戦
+- `MAHJONG_SOUL_RULES`: 雀魂 四人東南喰赤段位戦
+- `M_LEAGUE_RULES`: Mリーグ 四人東南戦
 
-特にRiichiLabのルールは公式仕様または実測で確認できていないため、推測で
-実装しない。
+各presetの具体値とprovenanceは `src/lisjong_engine/rule_presets.py` を正本とし、
+重要差分とrepresentative mechanics behaviorは `tests/test_rule_presets.py` で固定する。
 
-一方、`RuleSet` の型表現能力としては、これらのサービスで実際に使われている
-設定値の組み合わせ（頭ハネ、同順位・順位点按分、四槓子パオ、責任役満のみの
-責任払い、立直の最低持ち点なし、連風牌雀頭2符、ダブル役満採用など）を
-`dataclasses.replace()` で構成できることをtestで固定している。
-外部サービスpresetを追加する場合は、出典を確認したうえで後続Issueで扱う。
+provenanceは値と同じくversioned contractの一部として扱う。
+
+- Tenhou: 旧 `python-study` で2026-08-08時点の天鳳公式マニュアルを確認して確定した値
+- Mahjong Soul: ユーザーが確認・転記した「段位戦ルール説明」を正本として確定した値。
+  正本として記録されていない公開URLを推測で補わない
+- M League: 旧 `python-study` Issue #74 に確定した設定一覧を移管した値。
+  荒牌流局時の聴牌/ノーテン申告専用Actionを追加せず、実手牌の聴牌状態を使うという
+  project上の意図的差分を維持する
+
+これらは外部サービスが現在提供するすべてのルールを動的に追従するものではない。
+外部側の変更が確認された場合も既存presetを黙って変更せず、source確認とversion更新を行う。
+
+RiichiLabについては、公式仕様または実測でルールを十分に確認したpresetをまだ固定していない。
+未確認値を推測で補うことはしない。
 
 ## 12. 移行履歴
 
@@ -522,5 +560,9 @@ winning shape exists != legal scored win
 `lisjong-engine` ではこれらを単一の `RuleSet` へ統合し、`RulePreset` 相当の型は
 導入しない。これらの旧型名は移行元の説明としてのみ登場し、本engineの現行public
 contractではない。
+
+Issue #44 では、旧runtime型を復活させず、残っていたproject-standard / Tenhou /
+Mahjong Soul / M Leagueのpreset data・provenance・unique regression knowledgeを
+`rule_presets.py` / `test_rule_presets.py` へ移管した。
 
 詳細な棚卸し結果は `docs/python-study-migration.md` を参照。
