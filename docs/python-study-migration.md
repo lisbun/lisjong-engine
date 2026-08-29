@@ -66,6 +66,22 @@ Issue #32 の基準点。
 旧sourceの全面再調査ではなく、主として初回inventoryと現在のengine実装・test・
 確定済み設計契約を再照合する形で行った。
 
+### External preset migration
+
+Issue #44 で external rule preset を first-party 化した際の基準点。
+
+| 項目 | 値 |
+| --- | --- |
+| `python-study` | `main` = `7face9b94ad25797c0e5944f2e74219e6af966ef` |
+| `lisjong-engine` | `main` = `0ba2e83d01beeeaf9e0c5c62a290ddc54a4ce5cc` |
+| 調査日 | 2026-08-29 |
+| 対象 | project-standard / Tenhou / Mahjong Soul / M League |
+
+current `python-study` の `mahjong/rules.py` / `yaku.py` / `fu.py` と関連docs・testsを
+再確認し、旧 `MahjongRules` 全42 fieldに加えて `double_yakuman_variants` と
+`double_wind_pair_fu` を単一 `RuleSet` presetへ移管した。external 3 presetは
+project-standardから暗黙継承せず、独立した完全定義として固定した。
+
 ## Status semantics
 
 ### Initial `Status`
@@ -165,7 +181,7 @@ engineに含めない主な関心は次のとおり。
 | Domain model | engine / A | 中核contractは移行済み | 大半が `ready for cleanup review` |
 | Winning / scoring | engine / A中心 | pure scoring layerは移行済み。`yaku.py` は識別子・評価・RuleSetへ分割 | 大半が `ready for cleanup review` |
 | Legal actions / round state | engine / B中心 | pull API、revision、transactional reaction等を含む新構成へ移行 | `migrated` / `superseded`、cleanup review可 |
-| Rules | engine / B | 単一 `RuleSet` へ置換。defaultは移行済み | 旧外部preset資料のため `rules.py` はretain |
+| Rules | engine / B | 単一 `RuleSet` へ置換し、4 concrete presetをfirst-party化 | `rules.py` / preset資料とも `ready for cleanup review` |
 | Match / settlement | engine / A/B | state / settlement / final score / deterministic allocationへ再構成 | coreはcleanup review可。record/replay系は別判断 |
 | Game-layer gray zones | 分割 / B/C/D | SeatObservation、public ActionDescriptor、external selector driverを採用 | engine core分はcleanup review可。visible-event / decision / Player実装は別判断 |
 | mjai / adapter / transport | lisjong / D | engineへ移行しない | `needs decision` |
@@ -232,17 +248,18 @@ cleanupを妨げるものではない。
 
 | Source | Responsibility | Dest | Reuse | Migration state | Current replacement | Relevant test | Cleanup readiness | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `rules.py` | `MahjongRules` + policy enum + external preset data | engine | B | `superseded` | frozen `RuleSet` + policy enum + `RuleSet.default()` + `docs/rules.md` | `tests/test_rules.py` | `retain as migration source` | current default contractは置換済みだが旧external preset data / evidenceは未退避 |
-| `rule_preset.py` | `MahjongRules` / `YakuRules` / `FuRules`の束ね直し | engine | C/D | `superseded` | `RuleSet` | `tests/test_rules.py` | `ready for cleanup review` | bundle型を廃止し単一設定contractへ統合 |
+| `rules.py` | `MahjongRules` + policy enum + external preset data | engine | B | `superseded` | frozen `RuleSet` + policy enum + `rule_presets.py` + `docs/rules.md` | `tests/test_rules.py`, `tests/test_rule_presets.py` | `ready for cleanup review` | defaultに加えexternal preset data / provenance / regression knowledgeもIssue #44で退避済み |
+| `rule_preset.py` | `MahjongRules` / `YakuRules` / `FuRules`の束ね直し | engine | C/D | `superseded` | `RuleSet` | `tests/test_rules.py`, `tests/test_rule_presets.py` | `ready for cleanup review` | bundle型を廃止し単一設定contractへ統合 |
 
-`rules.py` のcurrent engine contract自体は `RuleSet` により置換済みである。
-ただし初回inventoryで価値を認めた天鳳・雀魂・Mリーグ等のexternal preset値は、
-current v0.1 contractへ一律移植していない。`roadmap.md` もpreset拡張を
-concrete use case drivenとするため、**旧preset data / source referenceを別の正本へ
-退避するまでは `rules.py` をengine migration sourceとして保持する**。
+`rules.py` の旧contractは、単一 `RuleSet` とfirst-party concrete presetへ置換した。
+Issue #44 ではproject-standard / Tenhou / Mahjong Soul / M Leagueについて、current
+`python-study` の42 rule fieldと、旧 `YakuRules` / `FuRules` に分かれていた2 configを
+再照合し、具体値・provenance・代表的なbehavior regressionをengine側へ退避した。
 
-これは `Migration state = superseded` と `Cleanup readiness = retain` が
-両立する意図的な例である。
+このため旧 `python-study/mahjong/rules.py` を **engine migration sourceとして保持する
+必要はなくなった**。`ready for cleanup review` は直ちに削除可能という意味ではなく、
+`python-study` 内の残存importやengine外consumerを後続cleanup auditで確認してから
+実際の削除可否を決める。
 
 ### Match / settlement
 
@@ -358,6 +375,7 @@ minimum contractを追加する。
 | `test_round_event.py` | A/B | current round event / terminal result tests | `migrated` |
 | `test_final_score.py` | A | `tests/test_final_score.py` | `migrated` |
 | `test_fu.py` / `test_dora.py` / `test_score.py` | A | current scoring tests | `migrated` |
+| external preset / `test_rules.py` / `test_rule_preset.py` | B/C | `tests/test_rules.py` + `tests/test_rule_presets.py` | `migrated` |
 
 ### Shared fixtures
 
@@ -373,12 +391,14 @@ rule edge caseがcurrent testsで固定されているかを確認する。
 
 | Source | Initial reuse | Current replacement / judgment | Relevant test | Migration state | Cleanup readiness | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `python-study/docs/mahjong-rules.md` | B | `docs/rules.md` とcurrent implementation contractへ再構成 | `tests/test_rules.py` + rule/scoring/round tests | `partial` | `retain as migration source` | `project-standard-v1` のcurrent contractは移行済みだが、external preset provenance / 情報源 / 一部のルール決定履歴は未退避 |
+| `python-study/docs/mahjong-rules.md` | B | `docs/rules.md` + `rule_presets.py` + current implementation contractへ再構成 | `tests/test_rules.py`, `tests/test_rule_presets.py` + rule/scoring/round tests | `superseded` | `ready for cleanup review` | project-standardに加えexternal preset provenance / 情報源 / intentional差分もIssue #44で退避済み |
 | `python-study/mahjong/README.md` | C | engine READMEへ丸ごと移さない | `—` | `—` | `needs decision` | learning history / old runtime説明が混在 |
 | `python-study/docs/mahjong-architecture.md` | C | engine知見は `architecture.md` / `rules.md` / 本ledgerへ抽出 | `—` | `—` | `needs decision` | lisjong・mjai・進捗履歴も混在するためcross-repo判断が必要 |
 
 `python-study` 側の学習履歴を保持するか、active mahjong runtimeとしての記述を
-cleanupするかは、このIssueでは決めない。
+cleanupするかは、このIssueでは決めない。`mahjong-rules.md` の
+`ready for cleanup review` も、engine migration sourceとしての保持理由がなくなった
+ことだけを意味する。
 
 ## Initial migration phases -> actual results
 
@@ -389,7 +409,7 @@ cleanupするかは、このIssueでは決めない。
 | --- | --- | --- | --- |
 | P1 | Domain model + seed基盤 | complete | Issue #5 / PR #6 |
 | P2 | 和了形解析 | complete | Issue #9 / PR #10 |
-| P3 | `RuleSet`統合 | complete（default contract） | Issue #11 / PR #12 |
+| P3 | `RuleSet`統合 | complete（default + external preset migration） | Issue #11 / PR #12、Issue #44 / PR #45 |
 | P4 | 得点評価 | complete | Issue #13 / PR #14 |
 | P5 | 合法手・1局状態遷移 | splitしてcomplete | Issue #15 / PR #16、Issue #17 / PR #18、Issue #19 / PR #20 |
 | P6 | 精算・半荘状態管理 | splitしてcomplete | Issue #21 / PR #22・#23、Issue #24 / PR #25 |
@@ -414,10 +434,10 @@ recordability、consumer readiness、performance、RuleSet evolutionは
 | `RoundState` の分割単位 | resolved for v0.1 | `player_state.py`, `legal_actions.py`, `reaction*`, `kan.py`, `winning_finalization.py`, `draw_resolution.py`等へ責務を抽出。今後のさらなる分割はhardening |
 | `Hand` / `River` のmutability | resolved in P1 | current mutable domain modelをcore mutation boundary内で使用 |
 | seed APIの粒度 | resolved for current foundation | `RandomSource`、Match / round allocation、random provenanceでdeterministic executionを確立 |
-| 終局基準ちょうど30,000点等のexternal rule差 | open when external preset is requested | default contractとは分離し、出典 / 実測が得られたpreset Issueで確定 |
+| 終局基準ちょうど30,000点等のexternal rule差 | resolved for migrated presets | Tenhou / Mahjong Soul / M Leagueの確認済み差分はconcrete first-party presetとして固定。未追加service / variantは引き続きevidence-drivenで扱う |
 | RiichiLab固有rule preset | external dependency / not fixed | `lisjong`側の実測等で確定するまで推測で追加しない |
 | reactionの3経路統合 | resolved by current implementation for v0.1 | current `reaction.py` / `reaction_boundary.py` / `kan.py`等のcontractを正本とする |
-| external preset追加時の検証手段 | open | concrete use caseで公式仕様・公開実装・実測等のevidenceを確認する |
+| external preset追加時の検証手段 | established for current presets | current source / provenanceを再確認し、独立完全定義・field差分・representative behavior regressionで固定する。未確認値は推測しない |
 
 Open questionが解消したことは「その実装を永久に変更しない」という意味ではない。
 post-v0.1 hardeningは `roadmap.md` に従う。
@@ -435,7 +455,8 @@ engine migration sourceとしては保持不要と判断した資産。**まだ�
 - domain modelの旧source
 - winning / scoringの大部分
 - legal action / round stateの旧source
-- `rule_preset.py`
+- `rules.py` / `rule_preset.py` とexternal preset runtime data
+- `docs/mahjong-rules.md` のengine rule / external preset migration sourceとしての役割
 - core `match_state.py` / `final_score.py`
 - old `game/public_state.py` / observation / controller / Player-ABC concept source
 - old `game/action_descriptor.py`
@@ -448,11 +469,12 @@ engine migration sourceとしては保持不要と判断した資産。**まだ�
 
 現時点でengine migration/referenceの価値が残るもの。
 
-- `python-study/mahjong/rules.py` のexternal preset data / evidence
-- `python-study/docs/mahjong-rules.md` のexternal preset provenance / 情報源 / 一部のルール決定履歴
 - `_ankan_chankan_round_fixture.py` のspecific edge-case coverage（current testとの最終照合まで）
 
-これらは必要情報を別の正本へ移した後にcleanup reviewへ進める。
+Issue #44 により、`python-study/mahjong/rules.py` と
+`python-study/docs/mahjong-rules.md` のexternal preset data / provenanceはこのlistから
+外れた。必要情報は `rule_presets.py`、`tests/test_rule_presets.py`、`docs/rules.md` に
+退避済みである。
 
 ### `needs decision`
 
@@ -471,16 +493,17 @@ Visualization・Analysis等の現在責務と突き合わせ、移行・保存�
 ## Audit conclusion
 
 初回P1〜P7の**engine core migrationはv0.1相当まで完了している**。
-したがって `python-study/mahjong` はもはやengine実装全体の恒久的なmigration source
-として保持する必要はない。
+さらにIssue #44でexternal rule preset data / provenance / representative regressionも
+first-party `RuleSet` presetへ退避した。このため `python-study/mahjong` はもはや
+engine実装全体やexternal presetの恒久的なmigration sourceとして保持する必要はない。
 
 一方で、次を理由に `python-study/mahjong` directory全体を一括削除してはならない。
 
-- external preset dataのように、まだ参照価値を別の正本へ移していない資産がある
 - CLI / Human Play、mjai、Decision / dataset等はengine責務外であり、別repositoryの
   migration状況を確認する必要がある
 - deterministic re-executionはhistorical Replay / recordabilityの代替ではない
 - shared fixture / testにはproduction codeとは独立したrule edge-case資産がある
+- mixed-purpose historical docsにはengine migration以外の学習履歴・設計履歴が残り得る
 
 次の工程は、本ledgerの `Cleanup readiness` を入力として `python-study` 側で
 dependency-aware cleanup auditを行い、実際の削除scopeを決めることである。
