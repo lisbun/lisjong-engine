@@ -94,8 +94,8 @@ RuleSet -X-> yaku evaluation
 直接importする。
 
 ```python
-from lisjong_engine.rules import RuleSet
 from lisjong_engine.rule_presets import TENHOU_RULES
+from lisjong_engine.rules import RuleSet
 from lisjong_engine.yaku import Yaku
 ```
 
@@ -106,8 +106,8 @@ from lisjong_engine.yaku import Yaku
 
 ```python
 PROJECT_STANDARD_RULES == RuleSet.default()  # 保証する
-RuleSet.default() == RuleSet.default()        # 保証する
-RuleSet.default() is RuleSet.default()        # 保証しない
+RuleSet.default() == RuleSet.default()  # 保証する
+RuleSet.default() is RuleSet.default()  # 保証しない
 ```
 
 first-partyに提供するconcrete presetは次の4つである。
