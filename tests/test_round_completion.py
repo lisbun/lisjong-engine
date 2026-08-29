@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import fields, is_dataclass
+from functools import cache
 
 from _round_fixtures import INERT_HAND, action_of_type, dealt_state, play_quiet_turn
 
@@ -298,6 +299,17 @@ def _play_deterministic_hanchan(seed: int = 12345) -> tuple[MatchState, Complete
     return match, completed
 
 
+@cache
+def _deterministic_completed_match(seed: int = 12345) -> CompletedMatch:
+    """決定的半荘を1度だけ実行し、共有可能な`CompletedMatch`のみを返す。
+
+    `MatchState`はmutableなため共有しない。`CompletedMatch`は
+    `@dataclass(frozen=True)`で、historyもtupleの`CompletedRound`から
+    成るため、この境界での共有は安全である。
+    """
+    return _play_deterministic_hanchan(seed)[1]
+
+
 def _build_non_dealer_tsumo_completed_round() -> CompletedRound:
     """South tsumoの`CompletedRound`を、乱数の運に頼らず決定的に組み立てる。"""
     hands = {seat: INERT_HAND for seat in Seat}
@@ -351,7 +363,7 @@ def _build_non_dealer_tsumo_completed_round() -> CompletedRound:
 class RoundCompletionProjectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        _, cls.completed_match = _play_deterministic_hanchan()
+        cls.completed_match = _deterministic_completed_match()
         cls.history = cls.completed_match.history
 
     def test_rejects_non_completed_round(self) -> None:
@@ -827,7 +839,7 @@ class RoundCompletionWinDetailProjectionTest(unittest.TestCase):
 class MatchCompletionProjectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        _, cls.completed_match = _play_deterministic_hanchan()
+        cls.completed_match = _deterministic_completed_match()
 
     def test_rejects_non_completed_match(self) -> None:
         with self.assertRaises(TypeError):

@@ -33,11 +33,12 @@ from lisjong_engine.driver import (
     run_hanchan,
 )
 from lisjong_engine.legal_action import AnkanLegalAction, KakanLegalAction
-from lisjong_engine.match_state import MatchPhase, MatchState
+from lisjong_engine.match_state import MatchPhase, MatchState, RoundPosition
 from lisjong_engine.observation import ObservationDecisionKind
 from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.rules import RonResolutionPolicy, RuleSet
 from lisjong_engine.seat import Seat
+from lisjong_engine.wind import Wind
 
 _REACTION_HANDS = {
     Seat.EAST: (
@@ -324,6 +325,15 @@ def _ankan_state():
         expected_revision=snapshot.revision,
     )
     return state
+
+
+def _match_at_position(seed: int, position: RoundPosition) -> MatchState:
+    """`start_round()`をEast1以外のpositionから開始できるよう、
+    testからだけprivate `_position`を上書きする。
+    """
+    match = MatchState(seed=seed)
+    match._position = position
+    return match
 
 
 def _match_with_active_round(round_state):
@@ -705,18 +715,20 @@ class RiichiDeclarationDiscardDriverTest(unittest.TestCase):
 
 
 class DriverResumeAndEndToEndTest(unittest.TestCase):
+    """`from_awaiting_round`/`first_result`は、決定的な複数局にまたがる
+    `run_hanchan()`完走のgenuine E2E ownerとしてsetUpClassで1回だけ実行する。
+
+    resume-from-active-round semantics自体はこのfull hanchanを再実行せず、
+    `test_same_seed_selectors_and_resume_point_produce_same_result`側で
+    deterministic terminal position（West 4, dealer NORTH）からの短い
+    1局runで独立に確認する。
+    """
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.from_awaiting_round = MatchState(seed=12345)
         cls.first_result = run_hanchan(
             cls.from_awaiting_round,
-            _selectors(_winning_first_selector),
-        )
-
-        cls.from_round_in_progress = MatchState(seed=12345)
-        cls.from_round_in_progress.start_round()
-        cls.second_result = run_hanchan(
-            cls.from_round_in_progress,
             _selectors(_winning_first_selector),
         )
 
@@ -733,10 +745,29 @@ class DriverResumeAndEndToEndTest(unittest.TestCase):
         self.assertIsNotNone(completed.final_score)
 
     def test_same_seed_selectors_and_resume_point_produce_same_result(self) -> None:
-        self.assertEqual(self.first_result, self.second_result)
+        position = RoundPosition(
+            prevailing_wind=Wind.WEST,
+            hand_number=4,
+            dealer_seat=Seat.NORTH,
+            honba=0,
+            riichi_sticks=0,
+        )
+
+        from_awaiting_round = _match_at_position(555, position)
+        result_from_awaiting_round = run_hanchan(
+            from_awaiting_round, _selectors(_winning_first_selector)
+        )
+
+        from_round_in_progress = _match_at_position(555, position)
+        from_round_in_progress.start_round()
+        result_from_round_in_progress = run_hanchan(
+            from_round_in_progress, _selectors(_winning_first_selector)
+        )
+
+        self.assertEqual(result_from_awaiting_round, result_from_round_in_progress)
         self.assertEqual(
-            self.from_awaiting_round.history,
-            self.from_round_in_progress.history,
+            from_awaiting_round.history,
+            from_round_in_progress.history,
         )
 
     def test_finished_match_returns_existing_result_without_callback(self) -> None:

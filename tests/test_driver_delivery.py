@@ -771,23 +771,53 @@ class HiddenInformationTest(unittest.TestCase):
 
 
 class BackwardCompatibilityTest(unittest.TestCase):
+    """`on_delivery`省略時とexplicit `None`が既存挙動を変えないことを、
+    deterministic terminal position（West 4, dealer NORTH）からの短い
+    実行で確認する。半荘完走はIssue #34の他のtestとround-evidence側で
+    独立にcoverされているため、ここでは1局分の終局のみを再現すれば足りる。
+    """
+
+    def _terminal_match(self, seed: int) -> MatchState:
+        position = RoundPosition(
+            prevailing_wind=Wind.WEST,
+            hand_number=4,
+            dealer_seat=Seat.NORTH,
+            honba=0,
+            riichi_sticks=0,
+        )
+        match = _match_at_position(seed, position)
+        round_state = match.start_round()
+        _finish_with_result(
+            round_state, AbortiveDrawResult(AbortiveDrawReason.FOUR_WINDS)
+        )
+        return match
+
     def test_on_delivery_none_matches_pre_existing_behavior(self) -> None:
-        def winning_first_selector(_observation, options):
-            return options[0]
+        def unexpected(_observation, _options):
+            self.fail(
+                "no selector should be called for an already-finished terminal round"
+            )
 
-        baseline_match = MatchState(seed=321)
-        baseline = run_hanchan(baseline_match, _selectors(winning_first_selector))
+        omitted_match = self._terminal_match(321)
+        omitted = run_hanchan(omitted_match, _selectors(unexpected))
 
-        with_delivery_match = MatchState(seed=321)
+        explicit_none_match = self._terminal_match(321)
+        explicit_none = run_hanchan(
+            explicit_none_match, _selectors(unexpected), on_delivery=None
+        )
+
         recorded: list = []
+        with_delivery_match = self._terminal_match(321)
         with_delivery = run_hanchan(
             with_delivery_match,
-            _selectors(winning_first_selector),
+            _selectors(unexpected),
             on_delivery=recorded.extend,
         )
 
-        self.assertEqual(baseline, with_delivery)
-        self.assertEqual(baseline_match.history, with_delivery_match.history)
+        self.assertEqual(omitted, explicit_none)
+        self.assertEqual(omitted, with_delivery)
+        self.assertEqual(omitted_match.history, explicit_none_match.history)
+        self.assertEqual(omitted_match.history, with_delivery_match.history)
         self.assertTrue(recorded)
 
 
