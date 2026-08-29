@@ -613,7 +613,14 @@ class MahjongSoulPresetMechanicsTest(unittest.TestCase):
             frozenset({1}),
         )
 
-    def test_three_seats_may_all_win_on_the_same_discard(self) -> None:
+    def test_multiple_ron_policy_awards_every_selecting_seat(self) -> None:
+        """`ron_resolution_policy`だけを消費する反応window解決のtest。
+
+        三家和を途中流局にしない（`triple_ron_abortive_draw=False`）という
+        雀魂固有の差分は、局終了判定を含む
+        `tests/test_round_winning.py`の
+        `test_triple_ron_abortive_draw_follows_the_injected_preset`で固定する。
+        """
         candidates = {seat: (_PASS, _RON) for seat in reaction_seat_order(_SOURCE_SEAT)}
         choices = {seat: _RON for seat in reaction_seat_order(_SOURCE_SEAT)}
 
