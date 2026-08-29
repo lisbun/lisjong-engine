@@ -370,12 +370,14 @@ match completionも同様にwhitelist方式で構築する。`round_completion.p
 `project_round_completion()` / `project_match_completion()`が、
 `CompletedRound` / `CompletedMatch`から`RoundCompletionFact` /
 `MatchCompletionFact`（和了 / 荒牌流局 / 途中流局の種別、winner席と
-win method、source seat、席別point delta、精算後score、dealer
-continuation、次局有無、`MatchEndReason`、最終score・順位）だけを構築する。
+win method、winnerのplayer-safeな終局手牌・副露・最高得点候補、公開済み
+ドラ表示牌、settlement transfer、source seat、席別point delta、精算後score、
+dealer continuation、次局有無、`MatchEndReason`、最終score・順位）だけを構築する。
 `CompletedRound.random_provenance`や`CompletedMatch.history`のような
-内部監査専用fieldは対応する公開fieldを持たない。役・符・ドラの内訳等、
-既存型の内部構造を無理にすべて再現する必要がない情報は、本Issueの
-minimum scopeへ含めない。
+内部監査専用fieldは対応する公開fieldを持たない。和了詳細は確定済みの役・
+翻 / 役満倍率・符・ドラ内訳・支払点だけをwhitelist射影し、得点を再計算しない。
+裏 / 槓裏表示牌は立直またはダブル立直winnerが1人以上いる和了局でだけ
+table-publicとして射影する。non-winnerのconcealed handは公開しない。
 
 **ordered progress deliveryのminimum boundary。**
 `RoundState.revision`だけをevent cursorとして扱うと、1 transactionが
