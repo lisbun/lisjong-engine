@@ -306,6 +306,52 @@ snapshot、public options、local mappingをcallback開始前に構築する。�
 driver自身はstateをmutationしない。Ron / Pon / Chi / Daiminkanのpriorityは既存resolverへ
 完全に委譲する。
 
+#### Transaction-committed selector decision delivery
+
+first-party engine executionで、selector inputとselected public choiceをsuccessful
+transactionに対応付けてsame-processで観測できるよう、`run_hanchan()`はoptionalな
+`on_selector_decision_commit`を持つ（Issue #56）。payloadは
+`selector_decision.py`のimmutableな`SelectorDecisionCommit`であり、各decisionは既存の
+`Seat`、`SeatObservation`、snapshot revision、ordered `ActionDescriptor` options、selected
+`ActionDescriptor`だけを保持する。
+
+```text
+SeatObservation + ActionDescriptor[]
+        -> selector
+        -> same ActionProjection.resolve()
+        -> RoundState.apply() / resolve_reactions() succeeds
+        -> existing on_delivery（public factがある場合）
+        -> optional on_selector_decision_commit
+        -> next engine transition
+```
+
+selectorがdescriptorを返した時点ではcommitではない。wrong type、unoffered descriptor、
+snapshot-local resolve failure、revision mismatch、`apply()` failure、reaction batch resolution
+failureではdecision commitをdeliveryしない。既存`on_delivery`が例外を送出した場合も、同じ
+transactionのdecision commitはpublishしない。decision callback自身の例外はfail-fastでcallerへ
+伝播し、次transitionへ進まない。いずれのcallback failureでも、既に成功したengine transactionは
+rollbackしない。
+
+turn transactionは1 decisionを1 commitとして渡す。立直選択とfreshな宣言牌選択は別revisionの
+別decisionであり、one-optionでもselectorを呼んだdecisionは欠落させない。reaction transactionは
+current canonical reacting-seat orderingの3 decisionを同一revisionの1 commitへ束ね、Pass-only seatも
+含める。transactionが`RoundProgressFact`を生成しなくてもdecision commitはdeliveryする。
+
+**selected reaction choiceはresolved outcomeではない。** 例えばChiとPonが競合してPonが成立しても、
+Chiを選んだseatの`selected_action`はChiのまま保持する。decision deliveryはreaction priorityやwinnerを
+再計算せず、成立結果は既存state transition / `RoundProgressFact`側の責務とする。
+
+**multi-seat commitはsingle-player safeではない。** 各`SeatObservation`はrecorded seatに対してだけ
+player-safeである。reaction commitのように複数seatのObservationを1 consumerが取得すると、集合として
+複数playerのprivate informationを含み得る。したがって`SelectorDecisionCommit`全体を単一playerへ渡して
+よいglobal-public recordと定義せず、consumerは対象seat向けdecisionだけを扱う。payloadへraw
+`LegalAction` / `LegalActionSnapshot` / `ActionProjection` mapping、physical tile ID、`RoundState` /
+`MatchState`、wall / dead-wall truth、seed / random provenance、`ReactionResolution`は含めない。
+
+この境界はpersistence、DecisionTrace / PolicyInput、AI analysis、canonical GameRecord、global ID、
+timestamp、generic event bus、replay schemaを導入しない。callbackを指定しない場合のselector invocation、
+projection、transaction、progress / evidence / completion delivery、match resultは従来どおりである。
+
 forced draw、嶺上draw、pending Ron finalization、局精算はそれぞれ既存`RoundState` /
 `MatchState` APIを呼ぶだけとし、driverは合法手導出、reaction priority、得点、流局、精算、
 連荘、終局条件、seed導出、Wall生成、Observation射影を再実装しない。validな

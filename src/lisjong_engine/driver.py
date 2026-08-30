@@ -23,6 +23,7 @@ from lisjong_engine.round_phase import RoundPhase
 from lisjong_engine.round_progress import RoundProgressFact, project_round_progress
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.seat import Seat
+from lisjong_engine.selector_decision import SelectorDecision, SelectorDecisionCommit
 
 ActionSelector: TypeAlias = Callable[
     [SeatObservation, tuple[ActionDescriptor, ...]],
@@ -42,6 +43,10 @@ DeliveryCallback: TypeAlias = Callable[[tuple[DeliveryItem, ...]], None]
 # delivery境界。`on_delivery`のtransaction batchとは別contractであり、
 # viewerごとのseat-relative evidenceを1つのimmutable valueとして渡す。
 RoundEvidenceCallback: TypeAlias = Callable[[RoundEvidenceCompletion], None]
+
+# selectorが返しただけのchoiceではなく、そのchoiceを入力とするengine
+# transactionが成功した後にだけ呼ばれるdelivery境界。
+SelectorDecisionCallback: TypeAlias = Callable[[SelectorDecisionCommit], None]
 
 _SEATS = tuple(Seat)
 # current seatだけが選ぶdecision phase。立直選択後の宣言牌decisionも、
@@ -78,6 +83,7 @@ def run_hanchan(
     *,
     on_delivery: DeliveryCallback | None = None,
     on_round_evidence_complete: RoundEvidenceCallback | None = None,
+    on_selector_decision_commit: SelectorDecisionCallback | None = None,
 ) -> CompletedMatch:
     """現在のvalidなMatchStateから再開し、CompletedMatchまで進める。
 
@@ -98,7 +104,18 @@ def run_hanchan(
     objectを含まない。callbackが例外を送出した場合はfail-fastでそのまま
     伝播し、精算も次局開始も行わない（retry・silent skipはしない）。
 
-    どちらのcallbackも指定しない場合、既存の`run_hanchan()`のselector呼出
+    `on_selector_decision_commit`を指定した場合、selector choiceを含む
+    `RoundState.apply()` / `resolve_reactions()`が成功し、既存`on_delivery`も
+    returnした後に、そのtransactionの`SelectorDecisionCommit`を同期的に
+    渡す。progress factがないtransactionでも呼ばれる。callback例外は
+    fail-fastで伝播し、次transitionへ進まない。既に成功したtransactionは
+    rollbackしない。
+
+    各decisionの`SeatObservation`はrecorded seatに対してplayer-safeだが、
+    reaction commitのようなmulti-seat bundle全体はsingle-player safeな
+    global-public recordではない。
+
+    いずれのcallbackも指定しない場合、既存の`run_hanchan()`のselector呼出
     順序・決定的進行・戻り値は変化しない。
     """
     if not isinstance(match_state, MatchState):
@@ -110,6 +127,10 @@ def run_hanchan(
         on_round_evidence_complete
     ):
         raise TypeError("on_round_evidence_complete must be callable or None")
+    if on_selector_decision_commit is not None and not callable(
+        on_selector_decision_commit
+    ):
+        raise TypeError("on_selector_decision_commit must be callable or None")
 
     event_cursor = (
         len(match_state.active_round.events)
@@ -144,6 +165,7 @@ def run_hanchan(
                 selectors_by_seat,
                 on_delivery,
                 event_cursor,
+                on_selector_decision_commit,
             )
             continue
         raise DriverStateError("unsupported match phase")
@@ -185,6 +207,7 @@ def _advance_round(
     selectors: dict[Seat, ActionSelector],
     on_delivery: DeliveryCallback | None = None,
     event_cursor: int = 0,
+    on_selector_decision_commit: SelectorDecisionCallback | None = None,
 ) -> int:
     """1つのround transactionを適用し、新しく確定したevent数を返す。
 
@@ -193,16 +216,25 @@ def _advance_round(
     factへ射影し、空でなければ1回のbatchとして同期的にdeliveryする。
     `RoundState.revision`だけをevent cursorとして扱わず、実際に追加された
     event数で欠落なくsliceを取得する。
+
+    selector-bearing transactionでは、既存`on_delivery`がreturnした後に
+    `on_selector_decision_commit`を呼ぶ。progress factがなくてもdecision
+    commitはdeliveryする。
     """
+    decision_commit: SelectorDecisionCommit | None = None
     phase = round_state.phase
     if phase is RoundPhase.AWAITING_DRAW:
         round_state.draw(_current_seat(round_state))
     elif phase is RoundPhase.AWAITING_RINSHAN_DRAW:
         round_state.draw_rinshan(_current_seat(round_state))
     elif phase in _CURRENT_SEAT_DECISION_PHASES:
-        _apply_turn_choice(match_state, round_state, selectors)
+        decision_commit = _apply_turn_choice(match_state, round_state, selectors)
     elif phase in _REACTION_PHASES:
-        _resolve_reaction_choices(match_state, round_state, selectors)
+        decision_commit = _resolve_reaction_choices(
+            match_state,
+            round_state,
+            selectors,
+        )
     elif phase is RoundPhase.AWAITING_WIN_FINALIZATION:
         round_state.finalize_pending_win(expected_revision=round_state.revision)
     elif phase is RoundPhase.UNDEALT:
@@ -212,9 +244,16 @@ def _advance_round(
     else:
         raise DriverStateError("unsupported round phase")
 
-    if on_delivery is None:
-        return event_cursor
-    return _deliver_new_progress(round_state, on_delivery, event_cursor)
+    next_event_cursor = event_cursor
+    if on_delivery is not None:
+        next_event_cursor = _deliver_new_progress(
+            round_state,
+            on_delivery,
+            event_cursor,
+        )
+    if decision_commit is not None and on_selector_decision_commit is not None:
+        on_selector_decision_commit(decision_commit)
+    return next_event_cursor
 
 
 def _deliver_new_progress(
@@ -288,7 +327,7 @@ def _apply_turn_choice(
     match_state: MatchState,
     round_state: RoundState,
     selectors: dict[Seat, ActionSelector],
-) -> None:
+) -> SelectorDecisionCommit:
     seat = _current_seat(round_state)
     decision = _build_decision_snapshot(match_state, round_state, seat)
     public_choice = selectors[seat](
@@ -296,18 +335,20 @@ def _apply_turn_choice(
         decision.projection.options,
     )
     internal_action = decision.projection.resolve(public_choice)
+    committed_decision = _selector_decision(seat, decision, public_choice)
     round_state.apply(
         seat,
         internal_action,
         expected_revision=decision.projection.revision,
     )
+    return SelectorDecisionCommit((committed_decision,))
 
 
 def _resolve_reaction_choices(
     match_state: MatchState,
     round_state: RoundState,
     selectors: dict[Seat, ActionSelector],
-) -> None:
+) -> SelectorDecisionCommit:
     shared_revision = round_state.revision
     reacting_seats = round_state.reacting_seats
     if len(reacting_seats) != 3:
@@ -336,7 +377,31 @@ def _resolve_reaction_choices(
             strict=True,
         )
     }
+    committed_decisions = tuple(
+        _selector_decision(seat, decision, choice)
+        for seat, decision, choice in zip(
+            reacting_seats,
+            decisions,
+            public_choices,
+            strict=True,
+        )
+    )
     round_state.resolve_reactions(
         internal_choices,
         expected_revision=shared_revision,
+    )
+    return SelectorDecisionCommit(committed_decisions)
+
+
+def _selector_decision(
+    seat: Seat,
+    snapshot: _DecisionSnapshot,
+    selected_action: ActionDescriptor,
+) -> SelectorDecision:
+    return SelectorDecision(
+        seat=seat,
+        revision=snapshot.projection.revision,
+        observation=snapshot.observation,
+        legal_actions=snapshot.projection.options,
+        selected_action=selected_action,
     )
