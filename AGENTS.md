@@ -27,7 +27,6 @@ Issueまたはユーザーの明示的な指示が本書と異なる場合は、
 - 上記は専属担当を定めない。必要に応じてAI間でcode・文書の担当を入れ替え、
   利用可能なtool、credit、作業内容、学習目的に応じて適切な作業場所を選べる
 
-
 ### AI resource / context efficiency
 
 AI利用ではcorrectnessを維持したうえで、context量、model reasoning、tool call、local compute、
