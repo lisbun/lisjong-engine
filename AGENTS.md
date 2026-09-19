@@ -27,6 +27,38 @@ Issueまたはユーザーの明示的な指示が本書と異なる場合は、
 - 上記は専属担当を定めない。必要に応じてAI間でcode・文書の担当を入れ替え、
   利用可能なtool、credit、作業内容、学習目的に応じて適切な作業場所を選べる
 
+### AI resource / context efficiency
+
+AI利用ではcorrectnessを維持したうえで、context量、model reasoning、tool call、local compute、
+paid usage / creditの不要な消費を避ける。
+
+- boundedなIssue / taskごとにfreshなAI sessionを優先し、長大な会話履歴をrepository stateや
+  project memoryの代わりにしない。継続に必要な状態はGitHub Issue、Pull Request、commit、
+  `AGENTS.md`、目的別document等のdurable sourceへ残す。ただし同一PRのfocused fix等で
+  既存contextを再利用する方が探索を減らせる場合は、無理にsessionを分割しない
+- AIへ作業を渡す前に、可能な範囲でIssueへ目的、scope、acceptance criteria、non-goals、
+  relevant ownership / safety boundaryを明示する。AIがrepository全体を探索して作業目的を
+  再発見することを標準フローにしない
+- repository調査ではIssueと既知の関連file / symbol / testから開始し、検索で対象を絞ってから読む。
+  concreteな必要性なしにrepository全体、大量のhistorical document、生成artifactを繰り返し読み込まない
+- model reasoning / agent capabilityはtaskを正しく完了できる範囲で必要最小限から開始し、
+  architecture判断、複雑なdebugging、security / information-flow、統計的意味論等、
+  lower-cost設定では品質上の懸念がある場合に段階的に上げる。高いreasoning levelを
+  task全体へ機械的に適用しない
+- deterministicなformat、lint、test、diff、CI status等はtool結果を正本として再利用し、
+  AIが同じ事実を理由なく繰り返し再推論・再確認しない
+- local validationはchanged behaviorをcoverするfocused testを優先する。CIがfull regressionの
+  正本である場合、具体的な理由なしにAI session内でfull suiteを重複実行・監視しない
+- 長時間commandについて、結果が変化し得ない短い間隔でのpollingを繰り返さない。
+  完了確認は合理的な間隔または利用可能なcompletion mechanismを使う
+- implementation self-reviewとCIが十分な場合、PR reviewはIssue acceptance criteriaとhigh-risk
+  boundaryから開始する。review修正後はchanged area、既知finding、その修正から生じ得る
+  regressionへfocused re-reviewし、新しい具体的riskなしにopen-ended broad reviewをやり直さない
+- AIが必要な情報をIssue、PR、tool result、current sessionで既に取得済みなら、stalenessの
+  合理的懸念がない限り同じ情報を再取得しない
+- resource / credit節約を理由にcorrectness、security、data integrity、information-flow boundary、
+  explicit acceptance criteriaを省略しない。high-risk taskで追加costが必要なら品質を優先する
+
 ### 開発フロー
 
 #### Issue、branch、Pull Request
