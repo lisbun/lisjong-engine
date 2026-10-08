@@ -24,6 +24,11 @@ from lisjong_engine.round_progress import RoundProgressFact, project_round_progr
 from lisjong_engine.round_state import RoundState
 from lisjong_engine.seat import Seat
 from lisjong_engine.selector_decision import SelectorDecision, SelectorDecisionCommit
+from lisjong_engine.transaction_observation import (
+    TransactionObservation,
+    TransactionStep,
+    TransactionStepKind,
+)
 
 ActionSelector: TypeAlias = Callable[
     [SeatObservation, tuple[ActionDescriptor, ...]],
@@ -47,6 +52,10 @@ RoundEvidenceCallback: TypeAlias = Callable[[RoundEvidenceCompletion], None]
 # selectorが返しただけのchoiceではなく、そのchoiceを入力とするengine
 # transactionが成功した後にだけ呼ばれるdelivery境界。
 SelectorDecisionCallback: TypeAlias = Callable[[SelectorDecisionCommit], None]
+
+# 成功した各round transactionの内部semantic stepを渡すprivileged境界。
+# 全席の手牌を含むため、selectorや上記player-safe deliveryへ渡してはならない。
+TransactionObservationCallback: TypeAlias = Callable[[TransactionObservation], None]
 
 _SEATS = tuple(Seat)
 # current seatだけが選ぶdecision phase。立直選択後の宣言牌decisionも、
@@ -84,6 +93,7 @@ def run_hanchan(
     on_delivery: DeliveryCallback | None = None,
     on_round_evidence_complete: RoundEvidenceCallback | None = None,
     on_selector_decision_commit: SelectorDecisionCallback | None = None,
+    on_transaction_observation: TransactionObservationCallback | None = None,
 ) -> CompletedMatch:
     """現在のvalidなMatchStateから再開し、CompletedMatchまで進める。
 
@@ -111,6 +121,13 @@ def run_hanchan(
     fail-fastで伝播し、次transitionへ進まない。既に成功したtransactionは
     rollbackしない。
 
+    `on_transaction_observation`を指定した場合、配牌（`start_round()`）を含む
+    成功した各round transactionの後、上記callbackがすべてreturnしてから、
+    そのtransactionの`TransactionObservation`を同期的に渡す。値は全席の
+    手牌を含むprivileged observationであり、selector・player-safe delivery
+    へは渡さない。callback例外はfail-fastで伝播し、次transitionへ進まない。
+    途中から再開したactive roundは、再開後のtransactionだけを観測する。
+
     各decisionの`SeatObservation`はrecorded seatに対してplayer-safeだが、
     reaction commitのようなmulti-seat bundle全体はsingle-player safeな
     global-public recordではない。
@@ -131,6 +148,10 @@ def run_hanchan(
         on_selector_decision_commit
     ):
         raise TypeError("on_selector_decision_commit must be callable or None")
+    if on_transaction_observation is not None and not callable(
+        on_transaction_observation
+    ):
+        raise TypeError("on_transaction_observation must be callable or None")
 
     event_cursor = (
         len(match_state.active_round.events)
@@ -144,14 +165,23 @@ def run_hanchan(
             return _completed_match(match_state)
         if phase is MatchPhase.AWAITING_ROUND:
             _require_match_shape(match_state, active_round=False, completed=False)
-            match_state.start_round()
+            round_state = match_state.start_round()
             event_cursor = 0
+            if on_transaction_observation is not None:
+                round_state.enable_transaction_observation()
+                # 配牌はstart_round()内で済むため、commit済みの開始状態を
+                # 1 stepのtransactionとして渡す。
+                on_transaction_observation(
+                    _round_start_observation(match_state, round_state)
+                )
             continue
         if phase is MatchPhase.ROUND_IN_PROGRESS:
             _require_match_shape(match_state, active_round=True, completed=False)
             round_state = match_state.active_round
             if round_state is None:
                 raise DriverStateError("a round in progress requires an active round")
+            if on_transaction_observation is not None:
+                round_state.enable_transaction_observation()
             if round_state.phase is RoundPhase.FINISHED:
                 # 精算前にだけ成立するevidence境界を先に渡し、callbackが
                 # returnしてから精算・次局へ進む。
@@ -166,6 +196,7 @@ def run_hanchan(
                 on_delivery,
                 event_cursor,
                 on_selector_decision_commit,
+                on_transaction_observation,
             )
             continue
         raise DriverStateError("unsupported match phase")
@@ -208,6 +239,7 @@ def _advance_round(
     on_delivery: DeliveryCallback | None = None,
     event_cursor: int = 0,
     on_selector_decision_commit: SelectorDecisionCallback | None = None,
+    on_transaction_observation: TransactionObservationCallback | None = None,
 ) -> int:
     """1つのround transactionを適用し、新しく確定したevent数を返す。
 
@@ -253,7 +285,43 @@ def _advance_round(
         )
     if decision_commit is not None and on_selector_decision_commit is not None:
         on_selector_decision_commit(decision_commit)
+    if on_transaction_observation is not None:
+        on_transaction_observation(
+            TransactionObservation(
+                round_ordinal=_round_ordinal(match_state),
+                revision=round_state.revision,
+                phase=round_state.phase,
+                current_seat=round_state.current_seat,
+                steps=round_state.last_transaction_steps,
+                selector_decision=decision_commit,
+            )
+        )
     return next_event_cursor
+
+
+def _round_ordinal(match_state: MatchState) -> int:
+    # active roundは、精算済みの局に続く局である。
+    return len(match_state.history) + 1
+
+
+def _round_start_observation(
+    match_state: MatchState,
+    round_state: RoundState,
+) -> TransactionObservation:
+    return TransactionObservation(
+        round_ordinal=_round_ordinal(match_state),
+        revision=round_state.revision,
+        phase=round_state.phase,
+        current_seat=round_state.current_seat,
+        steps=(
+            TransactionStep(
+                TransactionStepKind.ROUND_STARTED,
+                tuple(round_state.events),
+                round_state.committed_checkpoint(),
+            ),
+        ),
+        selector_decision=None,
+    )
 
 
 def _deliver_new_progress(

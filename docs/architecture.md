@@ -352,6 +352,38 @@ player-safeである。reaction commitのように複数seatのObservationを1 c
 timestamp、generic event bus、replay schemaを導入しない。callbackを指定しない場合のselector invocation、
 projection、transaction、progress / evidence / completion delivery、match resultは従来どおりである。
 
+#### Privileged transaction observation
+
+学習用source等のproducerが、1つのtransaction内で進む複数のsemantic stepを順序どおりに
+記録できるよう、`run_hanchan()`はoptionalな`on_transaction_observation`を持つ（Issue #61）。
+打牌→反応不要の解決→立直成立、反応解決→加槓成立、暗槓宣言→成立のように、既存deliveryの
+transaction後の結果だけでは順序を検証できない遷移が対象である。
+
+```text
+RoundState.enable_transaction_observation()
+    -> transition内の各semantic stepでTransactionStep（追加event + RoundCheckpoint）を保持
+    -> commit成功時だけlast_transaction_stepsへ公開（失敗transactionは捨てる）
+run_hanchan(on_transaction_observation=...)
+    -> start_round()の配牌を1 stepのROUND_STARTEDとして渡す
+    -> 各round transaction後、既存callbackがreturnしてからTransactionObservationを渡す
+```
+
+stepは`ROUND_STARTED`、`DRAW`、`TURN_CHOICE`、`REACTION_WINDOW_SKIPPED`、
+`REACTION_RESOLVED`、`KAN_CONFIRMED`、`RIICHI_FINALIZED`、`ROUND_ENDED`である。
+反応windowを開かない打牌・暗槓は`REACTION_WINDOW_SKIPPED`（機会なし）として残し、
+明示windowの合法候補・選択・capable / selected / awarded / passed・解決は
+`REACTION_RESOLVED`の`ReactionsResolvedEvent`が持つ。鳴き（大明槓を含む）は
+`REACTION_RESOLVED`内で適用し、加槓・暗槓の成立は別の`KAN_CONFIRMED`とする。
+transactionが追加したeventは欠落・重複なくいずれかのstepへ属し、最後のstepの
+checkpointはcommit後の盤面と一致する（commit時に検査し、不一致はinvariant error）。
+
+**この値はprivilegedであり、player-safeではない。** `RoundCheckpoint`は全席の手牌・ツモ牌・
+副露・河・見逃し理由・成立立直・一発を含む。selector、`on_delivery`、decision / evidence
+deliveryへは渡さない。山の並び、未公開の表示牌・嶺上牌、乱数状態は含めず、公開済みドラ表示牌と
+残り枚数だけを持つ。各checkpointはtransaction内の途中状態であり、selector時点の独立snapshotではない。
+callbackを指定しない場合、`RoundState`はstepを作らず、selector順序・合法手・seed決定性・結果は
+変わらない。callback例外はfail-fastで伝播し、次transitionへ進まない。
+
 forced draw、嶺上draw、pending Ron finalization、局精算はそれぞれ既存`RoundState` /
 `MatchState` APIを呼ぶだけとし、driverは合法手導出、reaction priority、得点、流局、精算、
 連荘、終局条件、seed導出、Wall生成、Observation射影を再実装しない。validな

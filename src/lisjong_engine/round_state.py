@@ -137,6 +137,12 @@ from lisjong_engine.round_result import (
 from lisjong_engine.rules import KanDoraRevealPolicy, RuleSet
 from lisjong_engine.seat import Seat
 from lisjong_engine.tile import Tile
+from lisjong_engine.transaction_observation import (
+    RoundCheckpoint,
+    SeatCheckpoint,
+    TransactionStep,
+    TransactionStepKind,
+)
 from lisjong_engine.wall import Wall
 from lisjong_engine.win_context import RiichiStatus, WinMethod, WinOrigin
 from lisjong_engine.wind import Wind
@@ -272,6 +278,10 @@ class _Transition:
     suukantsu_pao_seats: dict[Seat, Seat]
     events: RoundEventSnapshot
     result: RoundResult | None
+    # transaction観測を有効にした場合だけ、semantic stepを順に保持する。
+    steps: list[TransactionStep] | None = None
+    # 直前のstepまでに割り当て済みのevent数。
+    stepped_event_count: int = 0
 
 
 class RoundState:
@@ -316,6 +326,8 @@ class RoundState:
         self._events = RoundEventSnapshot()
         self._result: RoundResult | None = None
         self._revision = 0
+        self._observes_transactions = False
+        self._last_transaction_steps: tuple[TransactionStep, ...] = ()
         # 保存則checkの基準。局中に物理牌が増減しないことを直接確認する。
         self._tile_ids = frozenset(
             tile.id
@@ -514,6 +526,27 @@ class RoundState:
     def events(self) -> RoundEventSnapshot:
         return self._events
 
+    def enable_transaction_observation(self) -> None:
+        """以後の成功transactionごとのsemantic stepを保持する（privileged）。
+
+        有効化前のtransactionは遡って観測しない。有効化してもtransitionの
+        結果・revision・eventは変わらない。得られる値は全席の手牌を含み、
+        Policyやplayer-safe deliveryへ渡してはならない
+        （`transaction_observation`のmodule docstringを参照）。
+        """
+        self._observes_transactions = True
+
+    def committed_checkpoint(self) -> RoundCheckpoint:
+        """commit済みの盤面のcheckpoint（privileged）。"""
+        return self._checkpoint(self._begin())
+
+    @property
+    def last_transaction_steps(self) -> tuple[TransactionStep, ...]:
+        """直前に成功したtransactionのsemantic step列（privileged）。"""
+        if not self._observes_transactions:
+            raise IllegalOperationError("transaction observation is not enabled")
+        return self._last_transaction_steps
+
     @property
     def result(self) -> RoundResult | None:
         return self._result
@@ -620,6 +653,7 @@ class RoundState:
                 ),
             )
         )
+        self._mark(transition, TransactionStepKind.ROUND_STARTED)
 
         self._commit(transition)
         return {seat: tuple(dealt_tiles[seat]) for seat in _SEAT_ORDER}
@@ -862,6 +896,7 @@ class RoundState:
         transition.events = transition.events.appended(
             (TileDrawnEvent(seat, tile, source),)
         )
+        self._mark(transition, TransactionStepKind.DRAW)
 
         self._commit(transition)
         return tile
@@ -869,6 +904,7 @@ class RoundState:
     def _apply_tsumo(self, seat: Seat) -> None:
         """ツモactionをstrictに再評価し、成功時だけterminal commitする。"""
         transition = self._begin()
+        self._mark(transition, TransactionStepKind.TURN_CHOICE)
         view = self._transition_view(transition)
         claim = derive_tsumo_claim(view, seat)
         if claim is None:
@@ -887,6 +923,7 @@ class RoundState:
         callerの選択であり、engineが自動的に流局を選ぶことはない。
         """
         transition = self._begin()
+        self._mark(transition, TransactionStepKind.TURN_CHOICE)
         view = self._transition_view(transition)
         if not derive_nine_terminals_eligibility(view, seat):
             raise RoundInvariantError(
@@ -911,6 +948,7 @@ class RoundState:
                 "a riichi selection requires at least one declaration discard"
             )
         transition.phase = RoundPhase.AWAITING_RIICHI_DISCARD
+        self._mark(transition, TransactionStepKind.TURN_CHOICE)
         self._commit(transition)
 
     def _apply_discard(self, seat: Seat, action: DiscardLegalAction) -> None:
@@ -942,6 +980,7 @@ class RoundState:
             transition.pending_riichi_declaration = declaration
             new_events.append(RiichiDeclaredEvent(declaration))
         transition.events = transition.events.appended(new_events)
+        self._mark(transition, TransactionStepKind.TURN_CHOICE)
 
         if has_possible_reaction(
             discarder=seat,
@@ -965,6 +1004,7 @@ class RoundState:
             # 全員パスにしかならない。同じtransactionで全員パスと同じ
             # 結果まで進める。
             self._release_pending_kan_dora(transition)
+            self._mark(transition, TransactionStepKind.REACTION_WINDOW_SKIPPED)
             self._finalize_riichi(transition, ReactionType.PASS)
             self._finish_discard_without_ron(transition, discarder=seat)
 
@@ -982,6 +1022,7 @@ class RoundState:
 
         transition.pending_ankan = pending
         transition.phase = RoundPhase.AWAITING_ANKAN_REACTIONS
+        self._mark(transition, TransactionStepKind.TURN_CHOICE)
         if self._has_reaction_candidate(transition, seat):
             self._commit(transition)
             return
@@ -989,6 +1030,7 @@ class RoundState:
         # 国士無双の槍槓候補がいない（またはルールで無効な）暗槓は、
         # 反応windowを開かずその場で成立させる。
         transition.pending_ankan = None
+        self._mark(transition, TransactionStepKind.REACTION_WINDOW_SKIPPED)
         self._confirm_ankan(transition, seat, ankan)
         self._commit(transition)
 
@@ -1003,6 +1045,7 @@ class RoundState:
 
         transition.pending_kakan = PendingKakan(seat, kakan)
         transition.phase = RoundPhase.AWAITING_KAKAN_REACTIONS
+        self._mark(transition, TransactionStepKind.TURN_CHOICE)
         self._commit(transition)
 
     def _has_reaction_candidate(
@@ -1023,22 +1066,28 @@ class RoundState:
         self._record_missed_rons(transition, resolution)
         if resolution.is_ron:
             self._apply_ron(transition, resolution, target_tile)
+            self._mark(transition, TransactionStepKind.REACTION_RESOLVED)
         elif resolution.origin is ReactionOrigin.DISCARD:
             # この打牌はロン以外で解決したため、保留していた槓ドラを公開する。
             self._release_pending_kan_dora(transition)
             if resolution.is_call:
+                # 鳴きの適用までを反応解決のstepとする（`_apply_call`内で記録）。
                 self._apply_call(transition, resolution)
+            else:
+                self._mark(transition, TransactionStepKind.REACTION_RESOLVED)
         elif resolution.origin is ReactionOrigin.KAKAN:
             pending = transition.pending_kakan
             if pending is None:
                 raise RoundInvariantError("the pending kakan state is incomplete")
             transition.pending_kakan = None
+            self._mark(transition, TransactionStepKind.REACTION_RESOLVED)
             self._confirm_kakan(transition, pending.seat, pending.kakan)
         else:
             pending = transition.pending_ankan
             if pending is None:
                 raise RoundInvariantError("the pending ankan state is incomplete")
             transition.pending_ankan = None
+            self._mark(transition, TransactionStepKind.REACTION_RESOLVED)
             self._confirm_ankan(transition, pending.seat, pending.ankan)
 
         if resolution.origin is ReactionOrigin.DISCARD:
@@ -1110,8 +1159,7 @@ class RoundState:
             suukantsu_pao_seat=transition.suukantsu_pao_seats.get(seat),
         )
 
-    @staticmethod
-    def _finish_round(transition: _Transition, result: RoundResult) -> None:
+    def _finish_round(self, transition: _Transition, result: RoundResult) -> None:
         """result/event/cleanup/FINISHEDをworking copyへ一度だけ構築する。"""
         if transition.result is not None:
             raise RoundInvariantError("the round already has a result")
@@ -1132,6 +1180,7 @@ class RoundState:
         transition.pending_kan_dora_reveals = ()
         transition.phase = RoundPhase.FINISHED
         transition.events = transition.events.appended((RoundEndedEvent(result),))
+        self._mark(transition, TransactionStepKind.ROUND_ENDED)
 
     def _apply_call(
         self,
@@ -1179,12 +1228,14 @@ class RoundState:
             new_events.extend(self._confirm_daiminkan_dora(transition, seat))
             transition.phase = RoundPhase.AWAITING_RINSHAN_DRAW
             transition.events = transition.events.appended(new_events)
+            self._mark(transition, TransactionStepKind.REACTION_RESOLVED)
             self._finish_four_kans_if_applicable(transition)
             return
         # 鳴き後の打牌はツモを伴わないため、drawn tileのない
         # `AWAITING_DISCARD`が正常状態である。
         transition.phase = RoundPhase.AWAITING_DISCARD
         transition.events = transition.events.appended(new_events)
+        self._mark(transition, TransactionStepKind.REACTION_RESOLVED)
 
     def _finish_discard_without_ron(
         self,
@@ -1286,6 +1337,7 @@ class RoundState:
                 *self._reveal_kan_dora(transition, seat),
             )
         )
+        self._mark(transition, TransactionStepKind.KAN_CONFIRMED)
         self._finish_four_kans_if_applicable(transition)
 
     def _confirm_ankan(
@@ -1313,6 +1365,7 @@ class RoundState:
                 *self._reveal_kan_dora(transition, seat),
             )
         )
+        self._mark(transition, TransactionStepKind.KAN_CONFIRMED)
         self._finish_four_kans_if_applicable(transition)
 
     @staticmethod
@@ -1418,6 +1471,7 @@ class RoundState:
         transition.events = transition.events.appended(
             (RiichiFinalizedEvent(finalization),)
         )
+        self._mark(transition, TransactionStepKind.RIICHI_FINALIZED)
 
     @staticmethod
     def _cancel_all_ippatsu(transition: _Transition) -> None:
@@ -1506,10 +1560,73 @@ class RoundState:
             suukantsu_pao_seats=dict(self._suukantsu_pao_seats),
             events=self._events,
             result=self._result,
+            steps=[] if self._observes_transactions else None,
+            stepped_event_count=len(self._events),
+        )
+
+    def _mark(self, transition: _Transition, kind: TransactionStepKind) -> None:
+        """観測有効時だけ、ここまでの新しいeventとcheckpointを1 stepにする。"""
+        if transition.steps is None:
+            return
+        events = tuple(transition.events)[transition.stepped_event_count :]
+        transition.stepped_event_count = len(transition.events)
+        transition.steps.append(
+            TransactionStep(kind, events, self._checkpoint(transition))
+        )
+
+    def _checkpoint(self, transition: _Transition) -> RoundCheckpoint:
+        wall = transition.wall
+        seats = []
+        for seat in _SEAT_ORDER:
+            player = transition.players[seat]
+            hand = player.hand_tiles
+            drawn = next(
+                (tile for tile in hand if tile.id == transition.drawn_tile_id), None
+            )
+            seats.append(
+                SeatCheckpoint(
+                    seat=seat,
+                    seat_wind=self.seat_wind(seat),
+                    hand_tiles=hand,
+                    drawn_tile=drawn,
+                    drawn_tile_source=(
+                        None if drawn is None else transition.drawn_tile_source
+                    ),
+                    discards=player.discards,
+                    melds=player.melds,
+                    riichi_status=player.riichi_status,
+                    is_ippatsu=player.is_ippatsu,
+                    missed_ron_furiten=player.missed_ron_furiten,
+                )
+            )
+        return RoundCheckpoint(
+            dealer_seat=self._dealer_seat,
+            prevailing_wind=self._prevailing_wind,
+            live_tiles_remaining=wall.remaining_count,
+            rinshan_tiles_remaining=wall.remaining_rinshan_count,
+            revealed_dora_indicators=wall.revealed_dora_indicators,
+            seats=tuple(seats),
+            pending_riichi_declaration=transition.pending_riichi_declaration,
+            pending_kakan=transition.pending_kakan,
+            pending_ankan=transition.pending_ankan,
+            riichi_finalizations=transition.riichi_finalizations,
         )
 
     def _commit(self, transition: _Transition) -> None:
         self._validate_invariants(transition)
+        if transition.steps is not None:
+            # 追加eventはすべていずれかのstepへ属し、最後のstepがcommit後の
+            # 盤面と一致しなければならない。
+            if not transition.steps or transition.stepped_event_count != len(
+                transition.events
+            ):
+                raise RoundInvariantError(
+                    "every committed event must belong to a transaction step"
+                )
+            if transition.steps[-1].checkpoint != self._checkpoint(transition):
+                raise RoundInvariantError(
+                    "the last transaction step must match the committed state"
+                )
         self._wall = transition.wall
         self._players = transition.players
         self._phase = transition.phase
@@ -1528,6 +1645,8 @@ class RoundState:
         self._suukantsu_pao_seats = transition.suukantsu_pao_seats
         self._events = transition.events
         self._result = transition.result
+        if transition.steps is not None:
+            self._last_transaction_steps = tuple(transition.steps)
         self._revision += 1
 
     def _validate_revision(self, expected_revision: int) -> None:
