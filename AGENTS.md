@@ -78,28 +78,40 @@ paid usage / creditの不要な消費を避ける。
 - PRのmergeでIssue全体が完了する場合は`Closes #123`等を使用し、途中PRや一部変更だけを
   扱う場合は`Refs #123`等、Issueを早期closeしない関連付けを使用する
 
-#### mergeと完了後cleanup
+#### merge・closeと完了後cleanup
 
-- Pull Requestのmergeにはユーザーの明示的な承認を必要とする
-- ユーザーがmergeを承認した時点で、そのmergeに予定された次の定型cleanupも承認済みと
-  みなし、追加承認を必要としない
-  - `Closes #...`による対応Issueの自動close
-  - merge後、完了条件を満たし追加作業がないIssueの手動close
-  - 不要になったremoteのIssue主作業branch・補助branchの自動または手動削除
-- merge後は原則として変更担当AIが完了条件とcleanupを確認する。明示的に引き継いだ
-  レビュー担当AIも、同じ条件を確認できる場合は実行できる
-- PRをmergeせずcloseした場合は、Issueを機械的にcompletedとしてcloseせず、継続、
-  not planned、別PRへの引継ぎ等を確認する。remote branchは今後利用しないことが明らかな
-  場合だけ削除する
-- `main`等の長期branchはcleanup対象にしない
+- 通常開発のPR merge・Issue/PR closeは、以下のレビュー・検証条件を満たせばユーザーへの
+  追加承認を不要とする（2026-10-22の継続承認、lisbun/lisjong-project#106）
+- merge前にIssueのscope / acceptance criteriaと既存contractを確認し、implementation
+  self-review、必要なCI、semantic reviewを完了する。CI成功だけでレビュー済みとしない
+- 対象head SHA、レビュー結論、blocking指摘の解消、検証結果をPRへ記録する。
+  修正後は変更範囲・既知finding・直接のregressionをfocused re-reviewする。
+  high-risk changeの追加レビューは「AI code review」の規則に従う
+- blocking指摘がなく、当該headの必要CI / full suiteとbranch protection上の条件が満たされたら、
+  原則squash mergeする。merge時はexpected head SHAを指定し、head変更時は差分とCIを再確認する。
+  branch protectionやrequired reviewを迂回しない
+- Issue全体の完了条件と証拠が揃った場合は、`Closes #...`による自動closeまたは手動の
+  completed closeを行ってよい。実装mergeだけで実測・評価待ちのIssueをcloseしない。
+  一部完了なら`Refs #...`を使う
+- 重複・置換・中止等でIssue/PRをmergeせずcloseする場合も、根拠と引継ぎ先（あれば）を記録し、
+  適切なclose理由を使えば追加承認不要。未解決のscope・方針判断を勝手に完了や中止としない
+- 個別のユーザーによる保留、draft、具体的な未決判断がある場合は解消するまでmerge / closeしない。
+  過去の一律の「merge承認待ち」だけは、この継続承認で置き換える
+- 原則として変更担当AI（または明示的に引継ぎを受けたレビュー担当AI）が完了条件とcleanupを確認し、
+  不要になった作業branchを削除する。長期branchや未保存の作業は削除しない
+- merge commit、Issue状態、cleanup結果、残る作業を報告する
 
 #### repository settingsとその他の承認境界
 
 - repository settings変更には個別のユーザー承認を必要とする。ただし、merged PRの不要な
   head branchを自動削除する設定など、visibility、branch protection、Actions・security・
   permission、secret、外部公開、課金へ影響しない安全なcleanup設定に限り追加承認を不要とする
-- 上記の承認済みmergeに伴う定型cleanupを除き、破壊的操作、外部公開、課金、認証情報の
+- 上記の条件を満たすmerge・closeと定型cleanupを除き、破壊的操作、外部公開、課金、認証情報の
   使用は、対象と影響を示して承認を得る
+
+
+上記は通常開発のmerge / closeに関する継続承認であり、課金実行・実験開始・正式評価・
+稼働bot切替等の別承認やgateを変更しない。自律強化loopの運用開始（project #98等）も別判断とする。
 
 ### AI code review
 
