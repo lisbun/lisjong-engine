@@ -27,6 +27,17 @@ Issueまたはユーザーの明示的な指示が本書と異なる場合は、
 - 上記は専属担当を定めない。必要に応じてAI間でcode・文書の担当を入れ替え、
   利用可能なtool、credit、作業内容、学習目的に応じて適切な作業場所を選べる
 
+#### AI間の連携
+
+- AI間の相談・レビュー・意見交換は、対象のGitHub Issue / Pull Requestのコメントを正本とする。
+  チャットで得た結論のうち、方針・設計・実験条件に関わるものは、Issue / PRへ記録してから
+  次の作業へ進む
+- 他のAIへ意見を求める場合は、本文を転記せず、Issue / PRのURLと読むべきコメントを示す
+- 各AIの投稿は、どのAIの意見かが分かる形にする
+- ユーザーが「方針が一致すれば進め、差異があれば意見をまとめる」形で条件付きに委任した場合、
+  一致と判断した根拠（照合したIssue・記録・revision）をIssue / PRへ記録して進めてよい。
+  差異がある場合は、意見をIssue / PRへ投稿してユーザーの判断を待つ
+
 ### AI resource / context efficiency
 
 AI利用ではcorrectnessを維持したうえで、context量、model reasoning、tool call、local compute、
@@ -101,6 +112,31 @@ paid usage / creditの不要な消費を避ける。
   不要になった作業branchを削除する。長期branchや未保存の作業は削除しない
 - merge commit、Issue状態、cleanup結果、残る作業を報告する
 
+#### 追加承認なしで進めてよい作業（継続承認）
+
+- 次の作業は、記録を残すことを条件に、ユーザーへの追加承認を不要とする
+  （2026-10-25の継続承認、lisbun/lisjong-project#118）
+  - 既存Issue / PRへの分析・レビュー・意見のコメント投稿
+  - 設計のみ・調査のみのIssueの本文更新。既存の決定、scope、対象外、停止条件、判定基準を
+    変更せず、変更点と理由をコメントで記録する
+  - 既存の保存物・既使用のdevelopmentデータに対する、事前に固定した分析。新しい対局・seed予約・
+    課金・外部取得を伴わず、未使用の評価データ（OFFLINE-EVAL、未開封のformal test等）を開かず、
+    結果を見て分析項目を変更しない。ユーザー管理環境で行う場合は、Issueに記載した時間・メモリの
+    上限内に限る
+  - 事前登録した実験計画の内部ステップ（gate → rehearsal → 本計測 → verify → 回収）の連続実行。
+    ユーザーが計画全体を一度承認し、その計画のseed・予算・上限・停止条件・判定規則をIssueへ
+    固定していることを条件とする。STOP・失敗・上限超過・不整合が出たらその場で止め、
+    再試行や条件変更をせずに報告する
+- 次は従来どおり、その都度ユーザーの承認を必要とする
+  - 実験計画そのものの承認（上記の連続実行を始める前の1回）
+  - 課金を伴う実行（AWS起動等）、予算の変更
+  - 正式評価、Championの変更、稼働botの切替
+  - 外部source・外部データの取得、外部への公開
+  - secret・repository settings・branch protectionの変更
+  - 方針の変更（ADR、lisbun/lisjong-project#74 / #84等の順序・目標の変更）
+  - STOPした実験の再開、追加seedによる救済、判定基準の変更
+- この継続承認は、自律強化loopの運用開始（lisbun/lisjong-project#98等）を含まない
+
 #### repository settingsとその他の承認境界
 
 - repository settings変更には個別のユーザー承認を必要とする。ただし、merged PRの不要な
@@ -110,8 +146,10 @@ paid usage / creditの不要な消費を避ける。
   使用は、対象と影響を示して承認を得る
 
 
-上記は通常開発のmerge / closeに関する継続承認であり、課金実行・実験開始・正式評価・
-稼働bot切替等の別承認やgateを変更しない。自律強化loopの運用開始（project #98等）も別判断とする。
+上記のmerge / closeの継続承認（lisbun/lisjong-project#106）と追加承認なしで進めてよい作業
+（lisbun/lisjong-project#118）は、それぞれに記載した範囲に限る。課金実行・実験計画の承認・
+正式評価・稼働bot切替等の別承認やgateを変更しない。自律強化loopの運用開始（project #98等）も
+別判断とする。
 
 ### AI code review
 
