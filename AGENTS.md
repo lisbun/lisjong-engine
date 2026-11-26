@@ -131,11 +131,24 @@ paid usage / creditの不要な消費を避ける。
   - 実験計画そのものの承認（上記の連続実行を始める前の1回）
   - 課金を伴う実行（AWS起動等）、予算の変更
   - 正式評価、Championの変更、稼働botの切替
-  - 外部source・外部データの取得、外部への公開
+  - 下記の公開資料調査の継続承認に含まれない外部source・外部データの取得、外部への公開
   - secret・repository settings・branch protectionの変更
   - 方針の変更（ADR、lisbun/lisjong-project#74 / #84等の順序・目標の変更）
   - STOPした実験の再開、追加seedによる救済、判定基準の変更
 - この継続承認は、自律強化loopの運用開始（lisbun/lisjong-project#98等）を含まない
+
+#### 外部公開資料の調査に関する継続承認
+
+2026-11-27のユーザー承認（lisbun/lisjong-project#135）に基づき、技術調査・設計・レビューに限り、以下は追加承認不要とする。
+
+- 公開論文、技術文書、仕様、ライセンス、公開ソースコードの閲覧。
+- 既存の承認済み依存関係でversionが固定されているpackage（wheel等）を、公式配布元から取得し、隔離された一時領域で安全に展開・静的調査すること。
+
+後者は取得元・version・調査目的を記録し、外部コードの実行・installを行わず、既存依存関係・実行環境・repositoryを変更せず、課金・credential使用・内部データの外部送信を伴わないことを条件とする。展開時のpath traversal等に注意し、取得物はrepositoryへcommitしない。
+
+この範囲外の外部source取得（clone等）、新規依存関係の導入、外部コードの実行、外部model・外部学習データの取得、外部serviceへの内部データ送信は個別承認を必要とする。通常の承認済み開発・CIの実行を禁止するものではない。
+
+既使用developmentデータの分析に関する#118の外部取得禁止、実験・課金・正式評価・Champion変更・稼働bot切替・credential/settings変更・情報境界等の既存承認規則を緩和しない。過去の操作を遡及承認しない。
 
 #### repository settingsとその他の承認境界
 
